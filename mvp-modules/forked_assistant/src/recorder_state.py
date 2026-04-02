@@ -27,6 +27,7 @@ _start_stream, _stop_stream) are implemented on this class using weakref
 wiring so that RecorderStateStub inherits them without overriding.
 """
 
+import asyncio
 import time
 import weakref
 
@@ -131,6 +132,7 @@ class RecorderState:
 
         # --- Exit side-effects ---
         if old_phase == "wake_listen":
+            await self._drain_oww_predict()    # finish async predict before Silero starts
             self._clear_oww()                  # clear pending OWW chunks
         elif old_phase == "capture":
             pass                               # no cleanup on capture exit
@@ -209,6 +211,21 @@ class RecorderState:
     # -----------------------------------------------------------------------
     # OWW / Silero ops  (EU-3c fills real impls on base using _oww_ref / _vad_ref)
     # -----------------------------------------------------------------------
+
+    async def _drain_oww_predict(self) -> None:
+        """Await any pending async OWW predict task.
+
+        Prevents concurrent ONNX sessions (OWW + Silero) on wake_listen→capture.
+        Must complete before _reset_silero runs.
+        """
+        oww = self._oww_ref() if self._oww_ref else None
+        if oww is None:
+            return
+        pending = getattr(oww, '_pending_predict', None)
+        if pending and not pending.done():
+            print("  [state] draining pending OWW predict...")
+            await pending
+            print("  [state] OWW predict drained")
 
     def _reset_oww_full(self) -> None:
         """Full 5-buffer OWW reset: prediction_buffer, raw_data_buffer,

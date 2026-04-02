@@ -40,9 +40,9 @@ forked_assistant/
 |----|-------------|--------|
 | EU-1 | SharedMemory smoke test | Complete (`test/smoke_test_shm.py`) |
 | EU-2 | Ring buffer module | Complete (`src/ring_buffer.py`, tested in smoke_test) |
-| EU-3a | RecorderState base class | In progress (`src/recorder_state.py`) |
-| EU-3b | Track 1: IPC harness (fork + real SHM/pipe, no Pipecat) | In progress (`test/track1_ipc_harness.py`) |
-| EU-3c | Track 2: Pipeline harness (real Pipecat + stub IPC) | In progress (`test/track2_pipeline_harness*.py`) |
+| EU-3a | RecorderState base class | Complete (`src/recorder_state.py`) |
+| EU-3b | Track 1: IPC harness (fork + real SHM/pipe, no Pipecat) | Code complete — needs Pi run (`test/track1_ipc_harness.py`) |
+| EU-3c | Track 2: Pipeline harness (real Pipecat + stub IPC) | Complete (`test/track2_pipeline_harness.py`) |
 | EU-3d | Merge: Track 1 + Track 2 into real recorder child | Not started |
 
 EU-3b and EU-3c are **parallel tracks** that can be developed independently. EU-3d merges them.
@@ -63,27 +63,29 @@ Test files add `sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..',
 
 ## What's Next
 
-### Prerequisite smoke tests (not in EU path — must complete before trusting EU-3c accuracy metrics)
+### EU-3b — needs Pi run
 
-Two hardware-probe scripts are tracked in `spec/implementation_framework.md` under "Prerequisite Smoke Tests":
+`test/track1_ipc_harness.py` is code-complete and spec-compliant. It has not been run on Pi. **This is the only remaining blocker for EU-3d.**
 
-| ID | File | Status |
-|----|------|--------|
-| P-1 | `test/smoke_respeaker_channels.py` | complete — executed 2026-04-02 |
-| P-2 | `test/smoke_beamform_shim.py` | cancelled |
+Run without ReSpeaker — all audio is synthetic:
+```
+cd ~/raspberry-ai/mvp-modules/forked_assistant
+source ~/pipecat-agent/venv/bin/activate
+python test/track1_ipc_harness.py
+```
 
-**P-1 / P-2 fully closed.** 1-ch mono at 16kHz is confirmed correct. Channel provenance: ADC1 (channel 0) only — one physical mic, no mixing. PGA gain not in the 1-ch signal path; no software quality lever available. STT quality confirmed good via Deepgram. No further audio quality investigation warranted. See `memory/architecture_decisions.md` for full findings.
+Expected: 3 wake→capture→VAD cycles printed, ring spans with byte counts, clean exit. Also test Ctrl+C mid-wake-listen and mid-capture — shutdown must be clean (no hang).
 
-### EU-3c continuation — async OWW predict
+Note: `_drain_oww_predict()` was added to the `RecorderState` base after this file was written. `RecorderTrack1` never sets `_oww_ref`, so it returns immediately — harmless, but verify on first run.
 
-Track 2 pipeline harness (`test/track2_pipeline_harness.py`) is the working version with duty cycle instrumentation complete. Bookend entry/exit processors measure end-to-end per-frame pipeline traversal, with OWW predict timing, per-phase arrival cadence, and frame metadata logging.
+### EU-3c — complete (2026-04-02)
 
-**Duty cycle findings (2026-04-02):** OWW `model.predict()` takes 23.7ms mean on Pi 4 (119% of 20ms budget). It fires every 4th frame (1280-sample chunk at 320 samples/frame). Capture phase is clean at 7% utilization. See `memory/architecture_decisions.md` — "OWW Duty Cycle Characterization" for full data.
+Track 2 pipeline harness (`test/track2_pipeline_harness.py`) is complete. All spec criteria proven on Pi including async OWW predict:
 
-**Next step:** Move OWW predict to async via `asyncio.to_thread()`. This is an EU-3c scope extension, not a new EU. Changes:
-1. Reorder `OpenWakeWordProcessor.process_frame` — push_frame before predict
-2. Wrap predict in `to_thread` (ONNX releases GIL)
-3. Add drain guard in `RecorderState.set_phase()` for wake_listen→capture (prevent concurrent ONNX)
-4. Re-run duty cycle to confirm uniform frame traversal
+- Duty cycle: wake_listen 66% → 6% budget utilization, 0 frames over 20ms budget
+- Instrumentation puzzle resolved — see `memory/architecture_decisions.md`
+- `_predict_times` uses `deque(maxlen=500)` for safe extended runtime
 
-See `spec/implementation_framework.md` — EU-3c for full scope and the instrumentation puzzle note.
+### EU-3d — ready to start once EU-3b Pi run passes
+
+Merge Track 1's real downstream port into Track 2's pipeline. See `spec/stub_contracts.md` — EU-3d Merge Contract for the checklist. Estimated ~30 lines net new.

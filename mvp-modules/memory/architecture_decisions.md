@@ -112,7 +112,7 @@ Deepgram batch-mode STT on captures from this pipeline returns good transcripts.
 
 ## OWW Duty Cycle Characterization (2026-04-02)
 
-**Status: measured. Async predict optimization decided, not yet implemented.**
+**Status: implemented and proven (2026-04-02). EU-3c complete.**
 
 Duty cycle instrumentation (bookend processors at pipeline head/tail) measured end-to-end per-frame pipeline traversal time during a live wake→capture→VAD cycle on Pi 4.
 
@@ -134,7 +134,7 @@ Capture phase is clean: 7% utilization, all frames <5ms (Silero inference is muc
 
 **Instrumentation puzzle (tracked, not blocking):** The duty cycle histogram shows exactly 2× the predict call count as >20ms frames (223 >20ms vs 112 predict calls). The mechanism by which each predict causes 2 frames to measure >20ms in the bookend is likely an asyncio task scheduling artifact related to queue dwell time. This is tracked but deferred — further analysis is not warranted until the pipeline has broken-out OWW predict timing and the async optimization is in place. The operational characterization is unaffected: predict is the sole heavy operation.
 
-**Decision: move OWW predict to async (`asyncio.to_thread`)**
+**Decision: move OWW predict to async (`asyncio.to_thread`) — implemented and proven (2026-04-02)**
 
 OWW's `model.predict()` produces a side-channel signal (`signal_wake_detected`), not a frame transformation. There is no data dependency between predict's result and the audio frame flowing downstream. Frames can be pushed immediately; predict runs in background.
 
@@ -142,7 +142,21 @@ ONNX runtime is a C++ extension that releases the GIL during inference. `to_thre
 
 Cost: one frame of wake detection latency (~20ms). Imperceptible given OWW already accumulates 80ms of audio per chunk, and the master's command polling adds ~100ms on top.
 
-**Constraint: drain guard on phase transition.** When transitioning wake_listen→capture, any pending async predict must complete before Silero starts. This prevents concurrent ONNX sessions (the proven failure mode from step 7). Implemented as an asyncio.Event or similar in `RecorderState.set_phase()`.
+**Constraint: drain guard on phase transition.** When transitioning wake_listen→capture, any pending async predict must complete before Silero starts. This prevents concurrent ONNX sessions (the proven failure mode from step 7). Implemented as `_drain_oww_predict()` in `RecorderState.set_phase()` — called on wake_listen exit, before `_reset_silero()`.
+
+**After (measured 2026-04-02, same Pi 4 Cortex-A72 core 0):**
+
+| Metric | Before | After |
+|--------|--------|-------|
+| Wake_listen budget utilization | 66% | 6% |
+| Frames over 20ms budget | 223/675 (33%) | 0/1194 (0%) |
+| Wake_listen frame distribution | 50% <5ms, 50% >20ms (bimodal) | 100% <5ms (uniform) |
+| Predict mean (thread pool) | 23.7ms | 27.9ms (+4ms dispatch overhead) |
+| Capture budget utilization | 7% | 13% (Silero more visible at larger sample) |
+
+The dispatch overhead (~4ms) is irrelevant — predict is now off the critical path entirely.
+
+**Instrumentation puzzle resolved (2026-04-02).** The "2× predict count as >20ms frames" observation (223 >20ms frames vs 112 predict calls in the before data) is now explained: a synchronous predict blocking the event loop for ~24ms caused *both* the predict frame and the subsequent frame to measure >20ms in the bookend timing (the next frame's entry stamp was delayed by the blocked loop). With predict async, the subsequent frame sees the event loop immediately available — both frames measure <5ms. The 2× multiplier was direct event loop contention, not a queue dwell artifact.
 
 ## Why Recorder Is Capture-Only
 

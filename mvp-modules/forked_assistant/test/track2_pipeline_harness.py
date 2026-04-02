@@ -460,6 +460,12 @@ class OpenWakeWordProcessor(FrameProcessor):
     Gating: when not in wake_listen, chunks are discarded and frames pass through.
     OWW full reset is handled by RecorderState.set_phase() on transition —
     the _was_gated in-processor detection from v10a is removed.
+
+    Predict runs via asyncio.to_thread() so the event loop is never blocked
+    by ONNX inference.  Frames are pushed downstream before predict fires —
+    predict is a side-channel signal, not a frame transformation.  A drain
+    guard in RecorderState.set_phase() awaits _pending_predict on
+    wake_listen→capture to prevent concurrent ONNX (OWW + Silero).
     """
 
     def __init__(self, state: RecorderState):
@@ -470,12 +476,16 @@ class OpenWakeWordProcessor(FrameProcessor):
         self._chunks = []
         self.last_detection_time = 0.0
         self.DEBOUNCE_SECONDS = 1.8
-        self._predict_times: list[float] = []
+        self._predict_times: deque[float] = deque(maxlen=500)
+        self._predict_count: int = 0
         self._frames_in_wake: int = 0
+        self._pending_predict: asyncio.Task | None = None
         print("openwakeword ready")
 
     async def process_frame(self, frame: Frame, direction):
         await super().process_frame(frame, direction)
+
+        chunks_to_predict: list[np.ndarray] = []
 
         if isinstance(frame, AudioRawFrame):
             if not self.state.wake_listen:
@@ -492,24 +502,41 @@ class OpenWakeWordProcessor(FrameProcessor):
             while len(buffer) - consumed >= chunk_size:
                 chunk = buffer[consumed:consumed + chunk_size]
                 consumed += chunk_size
-                t_pred = time.perf_counter()
-                predictions = self.model.predict(chunk.astype(np.float32))
-                self._predict_times.append((time.perf_counter() - t_pred) * 1000.0)
-                current_time = time.time()
-                for wakeword, score in predictions.items():
-                    if (wakeword == "hey_jarvis"
-                            and score > 0.5
-                            and (current_time - self.last_detection_time) > self.DEBOUNCE_SECONDS):
-                        print(f"\nWAKE DETECTED -- '{wakeword}'  |  score: {score:.3f}")
-                        self.last_detection_time = current_time
-                        self.state.signal_wake_detected(score, wakeword)
+                chunks_to_predict.append(chunk.astype(np.float32))
             remainder = buffer[consumed:]
             self._chunks = [remainder] if len(remainder) > 0 else []
 
         await self.push_frame(frame, direction)
 
+        if chunks_to_predict and self.state.wake_listen:
+            if self._pending_predict and not self._pending_predict.done():
+                await self._pending_predict
+            self._pending_predict = asyncio.create_task(
+                self._predict_async(chunks_to_predict)
+            )
+
+    async def _predict_async(self, chunks: list[np.ndarray]) -> None:
+        """Run OWW predict in a thread pool; check scores on return."""
+        for chunk in chunks:
+            if not self.state.wake_listen:
+                return
+            t_pred = time.perf_counter()
+            predictions = await asyncio.to_thread(self.model.predict, chunk)
+            self._predict_times.append((time.perf_counter() - t_pred) * 1000.0)
+            self._predict_count += 1
+            if not self.state.wake_listen:
+                return
+            current_time = time.time()
+            for wakeword, score in predictions.items():
+                if (wakeword == "hey_jarvis"
+                        and score > 0.5
+                        and (current_time - self.last_detection_time) > self.DEBOUNCE_SECONDS):
+                    print(f"\nWAKE DETECTED -- '{wakeword}'  |  score: {score:.3f}")
+                    self.last_detection_time = current_time
+                    self.state.signal_wake_detected(score, wakeword)
+
     def predict_summary(self) -> str:
-        if not self._predict_times:
+        if not self._predict_count:
             return "  No OWW predict calls recorded."
         s = sorted(self._predict_times)
         n = len(s)
@@ -517,11 +544,14 @@ class OpenWakeWordProcessor(FrameProcessor):
         p95 = DutyCycleCollector._percentile(s, 0.95)
         p99 = DutyCycleCollector._percentile(s, 0.99)
         mx = s[-1]
-        ratio = self._frames_in_wake / n if n > 0 else 0
+        ratio = self._frames_in_wake / self._predict_count
+        window = f" (last {n})" if n < self._predict_count else ""
         lines = [
-            f"  OWW predict: {n} calls in {self._frames_in_wake} wake frames "
+            f"  OWW predict: {self._predict_count} calls in "
+            f"{self._frames_in_wake} wake frames "
             f"(1 per {ratio:.1f} frames)",
-            f"    mean={mean:.1f}ms  p95={p95:.1f}ms  p99={p99:.1f}ms  max={mx:.1f}ms",
+            f"    mean={mean:.1f}ms  p95={p95:.1f}ms  p99={p99:.1f}ms  "
+            f"max={mx:.1f}ms{window}",
         ]
         return "\n".join(lines)
 
