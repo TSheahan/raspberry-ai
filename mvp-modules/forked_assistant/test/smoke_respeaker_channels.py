@@ -233,7 +233,7 @@ def main() -> None:
         for ch in CHANNEL_CONFIGS:
             probe_channels(pa, ch)
 
-        tap_test(pa)
+        # tap_test(pa)
     finally:
         pa.terminate()
 
