@@ -59,19 +59,26 @@ Pi 4 has 4 ARM Cortex-A72 cores. The recorder child is pinned to core 0 via `os.
 
 Pinning prevents the OS scheduler from migrating the recorder process during a latency-sensitive audio callback. USB isochronous transfers are timing-sensitive — a missed deadline at the host controller level can cascade into buffer underruns.
 
-## Open Assumption: Mono Audio from ReSpeaker
+## ReSpeaker Audio Configuration — Resolved (P-1 2026-04-02)
 
-**Status: unvalidated — P-1 (`test/smoke_respeaker_channels.py`) written, pending execution on Pi. P-2 not started.**
+**Status: closed. 1-ch at 16kHz is confirmed correct and is the only working configuration.**
 
-All ring buffer sizing (`512KB ≈ 16s at 16kHz int16 mono`), OWW chunk math (1280 samples = 80ms mono), and Silero VAD frames assume **16 kHz int16 mono audio**. `LocalAudioTransport` is constructed without explicit `channels=` parameter, so Pipecat inherits whatever PyAudio's default is for device index 1.
+**P-1 findings (`test/smoke_respeaker_channels.py` run on Pi 2026-04-02):**
 
-The ReSpeaker 4-Mic Array USB device may present to PyAudio as a multi-channel device (4-ch or 6-ch depending on firmware). If so, `LocalAudioTransport` delivers interleaved multi-channel bytes and the code silently consumes them as mono. Effects:
+- Device: `seeed-4mic-voicecard: bcm2835-i2s-ac10x-codec0 (hw:3,0)`, 4 max input channels, 44100 Hz native default
+- 1-ch @ 16kHz: opens OK, delivers real audio (plausible noise floor samples)
+- 2-ch @ 16kHz: opens without error, correct byte count, but delivers silence even with sound present
+- 4-ch @ 16kHz: same — opens without error, silence only
 
-- OWW receives 4× the expected samples per "frame" (or pitch-shifted audio), degrading detection
-- Silero VAD receives similarly corrupted frames — the current VAD sensitivity issue may be a symptom of this
-- Ring buffer write-pos math is off by the channel factor
+The seeed ALSA driver accepts 2-ch and 4-ch opens at 16kHz silently but only activates real capture on the 1-ch path. The large values seen in the initial 2-ch read were a stream initialization artifact (stale DMA buffer); confirmed silence on re-run with audio present.
 
-Resolution path: complete `test/smoke_respeaker_channels.py` (P-1) to confirm actual device presentation, then `test/smoke_beamform_shim.py` (P-2) to prove a correct mono extraction path. Until then, Track 2 pipeline harness results for OWW accuracy and VAD sensitivity should be treated as unvalidated on the channel axis.
+The driver performs sample-rate conversion from the 44100 Hz hardware default to 16kHz on the 1-ch path. This is transparent to the application and confirmed working.
+
+**Consequences:**
+- `LocalAudioTransport` with no explicit `channels=` (Pipecat default = 1) is on the only valid path
+- All ring buffer, OWW, and Silero math assuming 16kHz int16 mono is correct
+- VAD sensitivity issues are not channel-packing symptoms — investigate Silero params/thresholds
+- **P-2 (beamform shim) is cancelled.** Software beam-forming requires working 4-ch capture, which is not available at 16kHz in this driver. Individual mic channels are inaccessible without opening at 44100 Hz and doing manual SRC — not warranted unless detection quality proves insufficient.
 
 ## Why Recorder Is Capture-Only
 
