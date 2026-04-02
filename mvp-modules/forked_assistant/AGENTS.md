@@ -45,7 +45,7 @@ forked_assistant/
 | EU-3a | RecorderState base class | Complete (`src/recorder_state.py`) |
 | EU-3b | Track 1: IPC harness (fork + real SHM/pipe, no Pipecat) | Complete (`test/track1_ipc_harness.py`) |
 | EU-3c | Track 2: Pipeline harness (real Pipecat + stub IPC) | Complete (`test/track2_pipeline_harness.py`) |
-| EU-3d | Merge: Track 1 + Track 2 into real recorder child | Code complete — needs Pi run (`src/recorder_child.py`, `test/test_harness.py`) |
+| EU-3d | Merge: Track 1 + Track 2 into real recorder child | Complete (`src/recorder_child.py`, `test/test_harness.py`) |
 
 EU-3b and EU-3c are **parallel tracks** that can be developed independently. EU-3d merges them.
 
@@ -65,29 +65,15 @@ Test files add `sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..',
 
 ## What's Next
 
-### EU-3d — code complete, needs Pi run
+### EU-4 — next up
 
-`src/recorder_child.py` and `test/test_harness.py` are code-complete. The merge combines Track 1's real downstream port (ring buffer + pipe signals) with Track 2's proven Pipecat pipeline into a single forked recorder child.
+Master process with batch-mode utterance processing. Reads ring buffer spans from recorder child, transcribes via Deepgram, sends to Claude. See `spec/implementation_framework.md` — EU-4.
 
-Run with ReSpeaker:
-```
-cd ~/raspberry-ai/mvp-modules/forked_assistant
-source ~/pipecat-agent/venv/bin/activate
-python test/test_harness.py
-```
+## Completed Effort Units
 
-Expected: 3 wake→capture→VAD cycles, ring spans readable by master with correct byte counts, clean exit. Also test Ctrl+C from at least one active state — shutdown must be clean (no hang, no Pi reboot).
+### EU-3d — complete (2026-04-02)
 
-**Merge checklist verified:**
-1. `RecorderChild.__init__` passes real pipe, RingBufferWriter owns SharedMemory directly
-2. All signal dicts match `interface_spec.md` exactly (WAKE_DETECTED, VAD_STARTED, VAD_STOPPED, STATE_CHANGED, READY)
-3. `write_audio()` delegates to `ring_buffer.RingBufferWriter.write()`
-4. `write_pos` included in all signal payloads
-
-**Architecture notes for Pi run:**
-- READY is sent before `runner.run()`. The first dormant→wake_listen `_start_stream()` may skip (stream not yet initialized by Pipecat); this is harmless because Pipecat starts the stream itself on pipeline start. Subsequent dormant transitions use `_start_stream()`/`_stop_stream()` normally.
-- Both master and child handle SIGINT. The master sends SHUTDOWN over the pipe; the child also has a direct signal handler that cancels the pipeline task.
-- The child timeout on join is 5s (up from Track 1's 3s) to allow for PyAudio + ONNX teardown.
+Merged recorder child passed on Pi: 2 full wake→capture→VAD cycles with correct ring spans (61440 / 59520 bytes, ~1.9s each), Ctrl+C mid-wake-listen on 3rd cycle with clean shutdown. All success criteria met.
 
 ### EU-3b — complete (2026-04-02)
 
@@ -95,8 +81,4 @@ Track 1 IPC harness (`test/track1_ipc_harness.py`) passed on Pi. SharedMemory, P
 
 ### EU-3c — complete (2026-04-02)
 
-Track 2 pipeline harness (`test/track2_pipeline_harness.py`) is complete. All spec criteria proven on Pi including async OWW predict. Duty cycle: 6% budget utilization, 0 frames over 20ms budget.
-
-### EU-4 — ready to start once EU-3d Pi run passes
-
-Master process with batch-mode utterance processing (STT + Claude). See `spec/implementation_framework.md` — EU-4.
+Track 2 pipeline harness (`test/track2_pipeline_harness.py`) passed on Pi including async OWW predict. Duty cycle: 6% budget utilization, 0 frames over 20ms budget.
