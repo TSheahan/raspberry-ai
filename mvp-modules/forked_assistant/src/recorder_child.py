@@ -9,18 +9,24 @@ master process.
 Combines Track 1's real downstream port (ring buffer + pipe signals) with
 Track 2's real Pipecat pipeline (GatedVADProcessor, OpenWakeWordProcessor).
 
+Duty cycle instrumentation (ENABLE_DUTY_CYCLE=1):
+  Bookend processors measure end-to-end pipeline traversal time per audio
+  frame. Composed into the pipeline only when enabled; zero overhead otherwise.
+  Per-phase histogram, arrival cadence, and OWW predict summary at exit.
+
 Entry point: recorder_child_entry(pipe, shm_name) — used as
 multiprocessing.Process target by the master.
 """
 
 import asyncio
+import math
 import os
 import signal
 import sys
 import time
 
 import numpy as np
-from collections import deque
+from collections import defaultdict, deque
 from functools import partial
 from multiprocessing.shared_memory import SharedMemory
 
@@ -42,6 +48,238 @@ from pipecat.audio.vad.vad_controller import VADController
 
 from recorder_state import RecorderState
 from ring_buffer import RingBufferWriter
+
+ENABLE_DUTY_CYCLE = os.environ.get("ENABLE_DUTY_CYCLE", "0") == "1"
+
+
+# ---------------------------------------------------------------------------
+# Duty cycle instrumentation — bookend entry/exit processors + collector
+# ---------------------------------------------------------------------------
+#
+# InputAudioRawFrame inherits from SystemFrame. System frames are awaited
+# inline in each processor's input task — they do NOT pass through the
+# process queue. When OWW's input task awaits predict(), no other processor
+# task can run. The elapsed time from DutyCycleEntry stamp to DutyCycleExit
+# collection captures the full blocking cost of all intermediate processors.
+# ---------------------------------------------------------------------------
+
+DUTY_CYCLE_WINDOW  = 100
+FRAME_DURATION_MS  = 20.0
+HISTOGRAM_EDGES_MS = (0, 5, 10, 15, 20)
+
+
+class DutyCycleCollector:
+    """Aggregates entry/exit timestamps and computes duty cycle statistics."""
+
+    def __init__(self, state: RecorderState, transport_input=None):
+        self._state = state
+        self._transport_input = transport_input
+
+        self._entry_stamps: deque[float] = deque()
+
+        self._window: list[float] = []
+        self._window_start_phase: str = "dormant"
+        self._window_arrivals: list[float] = []
+        self._window_max_qdepth: int = 0
+
+        self._phase_samples: dict[str, list[float]] = defaultdict(list)
+        self._phase_arrivals: dict[str, list[float]] = defaultdict(list)
+
+        self._last_arrival: float = 0.0
+        self._total_frames: int = 0
+
+    def stamp_entry(self) -> None:
+        now = time.perf_counter()
+        self._entry_stamps.append(now)
+
+        if self._last_arrival > 0:
+            gap_ms = (now - self._last_arrival) * 1000.0
+            self._window_arrivals.append(gap_ms)
+            self._phase_arrivals[self._state.phase].append(gap_ms)
+        self._last_arrival = now
+
+        qd = self._queue_depth()
+        if qd > self._window_max_qdepth:
+            self._window_max_qdepth = qd
+
+    def stamp_exit(self) -> None:
+        if not self._entry_stamps:
+            return
+        t0 = self._entry_stamps.popleft()
+        elapsed_ms = (time.perf_counter() - t0) * 1000.0
+
+        self._total_frames += 1
+
+        if not self._window:
+            self._window_start_phase = self._state.phase
+
+        self._window.append(elapsed_ms)
+        self._phase_samples[self._state.phase].append(elapsed_ms)
+
+        if len(self._window) >= DUTY_CYCLE_WINDOW:
+            self._emit_periodic()
+
+    def _queue_depth(self) -> int:
+        t = self._transport_input
+        if t and hasattr(t, '_audio_in_queue'):
+            return t._audio_in_queue.qsize()
+        return -1
+
+    @staticmethod
+    def _percentile(sorted_vals: list[float], p: float) -> float:
+        if not sorted_vals:
+            return 0.0
+        k = (len(sorted_vals) - 1) * p
+        f = math.floor(k)
+        c = math.ceil(k)
+        if f == c:
+            return sorted_vals[int(k)]
+        return sorted_vals[f] * (c - k) + sorted_vals[c] * (k - f)
+
+    def _emit_periodic(self) -> None:
+        if not self._window:
+            return
+        s = sorted(self._window)
+        n = len(s)
+        mean  = sum(s) / n
+        p95   = self._percentile(s, 0.95)
+        mx    = s[-1]
+        util  = mean / FRAME_DURATION_MS * 100.0
+
+        end_phase = self._state.phase
+        if self._window_start_phase == end_phase:
+            phase_lbl = end_phase
+        else:
+            phase_lbl = f"{self._window_start_phase}->{end_phase}"
+
+        arrival_str = ""
+        if self._window_arrivals:
+            a_mean = sum(self._window_arrivals) / len(self._window_arrivals)
+            a_var = sum((x - a_mean) ** 2 for x in self._window_arrivals) / len(self._window_arrivals)
+            a_std = a_var ** 0.5
+            arrival_str = f"  arrival: mean={a_mean:.1f}ms σ={a_std:.1f}ms"
+
+        qdepth_str = ""
+        if self._window_max_qdepth >= 0:
+            qdepth_str = f"  q_max={self._window_max_qdepth}"
+
+        print(f"  [DUTY/{self._total_frames}] {phase_lbl}: "
+              f"mean={mean:.1f}ms p95={p95:.1f}ms max={mx:.1f}ms "
+              f"util={util:.0f}%{arrival_str}{qdepth_str}")
+
+        self._window.clear()
+        self._window_arrivals.clear()
+        self._window_max_qdepth = 0
+        self._window_start_phase = self._state.phase
+
+    def print_final_summary(self, wake_processor=None) -> None:
+        print("\n" + "=" * 64)
+        print("DUTY CYCLE SUMMARY")
+        print("=" * 64)
+
+        for phase in ("wake_listen", "capture", "dormant"):
+            samples = self._phase_samples.get(phase)
+            if not samples:
+                continue
+            s = sorted(samples)
+            n = len(s)
+            mean = sum(s) / n
+            p95  = self._percentile(s, 0.95)
+            p99  = self._percentile(s, 0.99)
+            mx   = s[-1]
+            util = mean / FRAME_DURATION_MS * 100.0
+
+            print(f"\n  {phase}  ({n} frames, budget util {util:.0f}%)")
+            print(f"    mean={mean:.1f}ms  p95={p95:.1f}ms  p99={p99:.1f}ms  max={mx:.1f}ms")
+
+            edges = HISTOGRAM_EDGES_MS
+            buckets = [0] * (len(edges))
+            for v in s:
+                placed = False
+                for i in range(len(edges) - 1):
+                    if v < edges[i + 1]:
+                        buckets[i] += 1
+                        placed = True
+                        break
+                if not placed:
+                    buckets[-1] += 1
+
+            bar_max = max(buckets) if buckets else 1
+            for i, count in enumerate(buckets):
+                if i < len(edges) - 1:
+                    label = f"{edges[i]:>2}-{edges[i+1]:<2}ms"
+                else:
+                    label = f">{edges[-1]:<2} ms"
+                pct = count / n * 100.0
+                bar = "\u2588" * max(1, int(count / bar_max * 30)) if count else ""
+                print(f"    {label}: {count:>5} ({pct:4.0f}%)  {bar}")
+
+        over = sum(1 for samples in self._phase_samples.values()
+                   for v in samples if v > FRAME_DURATION_MS)
+        total = sum(len(s) for s in self._phase_samples.values())
+        print(f"\n  Frames over {FRAME_DURATION_MS:.0f}ms budget: "
+              f"{over}/{total}" + (f" ({over/total*100:.1f}%)" if total else ""))
+
+        if self._phase_arrivals:
+            print(f"\n  Arrival cadence (inter-frame intervals):")
+            for phase in ("wake_listen", "capture", "dormant"):
+                arrivals = self._phase_arrivals.get(phase)
+                if not arrivals:
+                    continue
+                sa = sorted(arrivals)
+                n = len(sa)
+                a_mean = sum(sa) / n
+                a_var = sum((x - a_mean) ** 2 for x in sa) / n
+                a_std = a_var ** 0.5
+                print(f"    {phase} ({n}): mean={a_mean:.1f}ms σ={a_std:.1f}ms "
+                      f"min={sa[0]:.1f}ms max={sa[-1]:.1f}ms")
+
+        if wake_processor:
+            print()
+            print(wake_processor.predict_summary())
+
+        print("=" * 64)
+
+
+class DutyCycleEntry(FrameProcessor):
+    """Pipeline head bookend: stamps each audio frame's arrival time."""
+
+    def __init__(self, collector: DutyCycleCollector):
+        super().__init__()
+        self._collector = collector
+        self._first_frame_logged = False
+
+    async def process_frame(self, frame: Frame, direction: FrameDirection):
+        await super().process_frame(frame, direction)
+        if isinstance(frame, (AudioRawFrame, InputAudioRawFrame)):
+            if not self._first_frame_logged:
+                self._log_first_frame(frame)
+                self._first_frame_logged = True
+            self._collector.stamp_entry()
+        await self.push_frame(frame, direction)
+
+    def _log_first_frame(self, frame):
+        audio_bytes = len(frame.audio)
+        samples = audio_bytes // 2
+        sr = getattr(frame, 'sample_rate', '?')
+        ch = getattr(frame, 'num_channels', '?')
+        dur = f"{samples / sr * 1000:.1f}ms" if isinstance(sr, (int, float)) and sr > 0 else "?"
+        print(f"  [DUTY] First audio frame: {audio_bytes} bytes, "
+              f"{samples} samples, sr={sr} Hz, ch={ch}, duration={dur}")
+
+
+class DutyCycleExit(FrameProcessor):
+    """Pipeline tail bookend: completes the timing measurement."""
+
+    def __init__(self, collector: DutyCycleCollector):
+        super().__init__()
+        self._collector = collector
+
+    async def process_frame(self, frame: Frame, direction: FrameDirection):
+        await super().process_frame(frame, direction)
+        if isinstance(frame, (AudioRawFrame, InputAudioRawFrame)):
+            self._collector.stamp_exit()
+        await self.push_frame(frame, direction)
 
 
 # ---------------------------------------------------------------------------
@@ -214,6 +452,26 @@ class OpenWakeWordProcessor(FrameProcessor):
                     self.last_detection_time = current_time
                     self.state.signal_wake_detected(score, wakeword)
 
+    def predict_summary(self) -> str:
+        if not self._predict_count:
+            return "  No OWW predict calls recorded."
+        s = sorted(self._predict_times)
+        n = len(s)
+        mean = sum(s) / n
+        p95 = DutyCycleCollector._percentile(s, 0.95)
+        p99 = DutyCycleCollector._percentile(s, 0.99)
+        mx = s[-1]
+        ratio = self._frames_in_wake / self._predict_count
+        window = f" (last {n})" if n < self._predict_count else ""
+        lines = [
+            f"  OWW predict: {self._predict_count} calls in "
+            f"{self._frames_in_wake} wake frames "
+            f"(1 per {ratio:.1f} frames)",
+            f"    mean={mean:.1f}ms  p95={p95:.1f}ms  p99={p99:.1f}ms  "
+            f"max={mx:.1f}ms{window}",
+        ]
+        return "\n".join(lines)
+
 
 # ---------------------------------------------------------------------------
 # AudioFrameWriter — writes audio frames via state.write_audio()
@@ -294,6 +552,10 @@ async def recorder_child_main(pipe, shm_name: str) -> None:
 
         input_transport = transport.input()
 
+        duty_collector = None
+        if ENABLE_DUTY_CYCLE:
+            duty_collector = DutyCycleCollector(state=state, transport_input=input_transport)
+
         state.set_transport(input_transport)
         state.set_vad(vad_processor)
         state.set_oww(wake_processor)
@@ -308,13 +570,21 @@ async def recorder_child_main(pipe, shm_name: str) -> None:
             await original_cancel(frame)
         input_transport.cancel = cancel_with_stream_stop
 
-        pipeline = Pipeline([
-            input_transport, vad_processor, wake_processor, audio_writer,
-        ])
+        processors = [input_transport]
+        if duty_collector:
+            processors.append(DutyCycleEntry(duty_collector))
+        processors.extend([vad_processor, wake_processor, audio_writer])
+        if duty_collector:
+            processors.append(DutyCycleExit(duty_collector))
+
+        pipeline = Pipeline(processors)
         runner = PipelineRunner()
         task = PipelineTask(pipeline)
 
         pipe.send({"cmd": "READY"})
+        if duty_collector:
+            print(f"  [child] duty cycle probe ENABLED "
+                  f"(window={DUTY_CYCLE_WINDOW} frames, budget={FRAME_DURATION_MS:.0f}ms)")
 
         loop = asyncio.get_running_loop()
         shutdown_via_signal = False
@@ -341,6 +611,8 @@ async def recorder_child_main(pipe, shm_name: str) -> None:
                 await listener
             except asyncio.CancelledError:
                 pass
+            if duty_collector:
+                duty_collector.print_final_summary(wake_processor)
             for sig in (signal.SIGINT, signal.SIGTERM):
                 loop.remove_signal_handler(sig)
     finally:
