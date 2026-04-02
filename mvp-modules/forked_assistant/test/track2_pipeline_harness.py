@@ -12,10 +12,18 @@ to the real SharedMemory ring (512 KB, wrap-around bytearray copy) so that
 write_audio() imposes the same per-frame memcpy cost as production. Data
 consumption is not under test here — no reader is attached.
 
+DutyCycleProbe (optional, composed into pipeline when ENABLE_DUTY_CYCLE=1):
+  Measures end-to-end pipeline processing time per audio frame by exploiting
+  pipecat's direct-mode synchronous push_frame chain. Also tracks inter-frame
+  arrival jitter and transport audio queue depth. Stats are printed every
+  DUTY_CYCLE_WINDOW frames with start/end phase labels, and a per-phase
+  histogram is printed at harness exit.
+
 Usage (on Pi with ReSpeaker):
     cd ~/raspberry-ai/mvp-modules/forked_assistant
     source ~/pipecat-agent/venv/bin/activate
-    python test/track2_pipeline_harness.py
+    python test/track2_pipeline_harness.py                   # without duty cycle
+    ENABLE_DUTY_CYCLE=1 python test/track2_pipeline_harness.py  # with duty cycle
 """
 
 import os, sys
@@ -24,7 +32,9 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'src'))
 import asyncio
 import signal
 import time
+import math
 import numpy as np
+from collections import defaultdict
 from functools import partial
 
 from openwakeword.model import Model as OWWModel
@@ -86,6 +96,190 @@ class InProcessRingBuffer:
     def summary(self) -> str:
         laps = self._write_pos / self._size
         return f"ring: write_pos={self._write_pos} ({laps:.2f} laps of {self._size} B)"
+
+
+# ---------------------------------------------------------------------------
+# DutyCycleProbe — end-to-end pipeline timing (Methods A+B+C)
+# ---------------------------------------------------------------------------
+
+DUTY_CYCLE_WINDOW  = 100   # frames per periodic report (100 frames ≈ 2 s)
+FRAME_DURATION_MS  = 20.0  # PyAudio cadence — the budget
+
+HISTOGRAM_EDGES_MS = (0, 5, 10, 15, 20)  # bucket boundaries for final summary
+
+
+class DutyCycleProbe(FrameProcessor):
+    """Head-of-chain probe measuring total downstream processing time.
+
+    Placed between the input transport and the first real processor.  In
+    pipecat's direct mode, push_frame() blocks until the entire downstream
+    chain returns, so timing that single call gives the true per-frame
+    pipeline duty cycle.
+
+    Also records inter-frame arrival interval (jitter) and samples the
+    transport's _audio_in_queue depth each frame.
+    """
+
+    def __init__(self, state: RecorderState, transport_input=None):
+        super().__init__()
+        self._state = state
+        self._transport_input = transport_input
+
+        # --- rolling window (periodic report) ---
+        self._window: list[float] = []
+        self._window_start_phase: str = "dormant"
+        self._window_arrivals: list[float] = []
+        self._window_max_qdepth: int = 0
+
+        # --- per-phase accumulators (final summary) ---
+        self._phase_samples: dict[str, list[float]] = defaultdict(list)
+
+        # --- inter-frame tracking ---
+        self._last_arrival: float = 0.0
+        self._total_frames: int = 0
+
+    # -- helpers --------------------------------------------------------
+
+    def _queue_depth(self) -> int:
+        t = self._transport_input
+        if t and hasattr(t, '_audio_in_queue'):
+            return t._audio_in_queue.qsize()
+        return -1
+
+    @staticmethod
+    def _percentile(sorted_vals: list[float], p: float) -> float:
+        if not sorted_vals:
+            return 0.0
+        k = (len(sorted_vals) - 1) * p
+        f = math.floor(k)
+        c = math.ceil(k)
+        if f == c:
+            return sorted_vals[int(k)]
+        return sorted_vals[f] * (c - k) + sorted_vals[c] * (k - f)
+
+    def _emit_periodic(self) -> None:
+        if not self._window:
+            return
+        s = sorted(self._window)
+        n = len(s)
+        mean  = sum(s) / n
+        p95   = self._percentile(s, 0.95)
+        mx    = s[-1]
+        util  = mean / FRAME_DURATION_MS * 100.0
+
+        end_phase = self._state.phase
+        if self._window_start_phase == end_phase:
+            phase_lbl = end_phase
+        else:
+            phase_lbl = f"{self._window_start_phase}->{end_phase}"
+
+        arrival_str = ""
+        if self._window_arrivals:
+            sa = sorted(self._window_arrivals)
+            a_mean = sum(sa) / len(sa)
+            a_jitter = sa[-1] - sa[0]
+            arrival_str = f"  arrival: mean={a_mean:.1f}ms jitter={a_jitter:.1f}ms"
+
+        qdepth_str = ""
+        if self._window_max_qdepth >= 0:
+            qdepth_str = f"  q_max={self._window_max_qdepth}"
+
+        print(f"  [DUTY/{self._total_frames}] {phase_lbl}: "
+              f"mean={mean:.1f}ms p95={p95:.1f}ms max={mx:.1f}ms "
+              f"util={util:.0f}%{arrival_str}{qdepth_str}")
+
+        self._window.clear()
+        self._window_arrivals.clear()
+        self._window_max_qdepth = 0
+        self._window_start_phase = self._state.phase
+
+    def print_final_summary(self) -> None:
+        print("\n" + "=" * 64)
+        print("DUTY CYCLE SUMMARY")
+        print("=" * 64)
+
+        for phase in ("wake_listen", "capture", "dormant"):
+            samples = self._phase_samples.get(phase)
+            if not samples:
+                continue
+            s = sorted(samples)
+            n = len(s)
+            mean = sum(s) / n
+            p95  = self._percentile(s, 0.95)
+            p99  = self._percentile(s, 0.99)
+            mx   = s[-1]
+            util = mean / FRAME_DURATION_MS * 100.0
+
+            print(f"\n  {phase}  ({n} frames, budget util {util:.0f}%)")
+            print(f"    mean={mean:.1f}ms  p95={p95:.1f}ms  p99={p99:.1f}ms  max={mx:.1f}ms")
+
+            # histogram
+            edges = HISTOGRAM_EDGES_MS
+            buckets = [0] * (len(edges))  # last bucket is > final edge
+            for v in s:
+                placed = False
+                for i in range(len(edges) - 1):
+                    if v < edges[i + 1]:
+                        buckets[i] += 1
+                        placed = True
+                        break
+                if not placed:
+                    buckets[-1] += 1
+
+            bar_max = max(buckets) if buckets else 1
+            for i, count in enumerate(buckets):
+                if i < len(edges) - 1:
+                    label = f"{edges[i]:>2}-{edges[i+1]:<2}ms"
+                else:
+                    label = f">{edges[-1]:<2} ms"
+                pct = count / n * 100.0
+                bar = "\u2588" * max(1, int(count / bar_max * 30)) if count else ""
+                print(f"    {label}: {count:>5} ({pct:4.0f}%)  {bar}")
+
+        over = sum(1 for samples in self._phase_samples.values()
+                   for v in samples if v > FRAME_DURATION_MS)
+        total = sum(len(s) for s in self._phase_samples.values())
+        print(f"\n  Frames over {FRAME_DURATION_MS:.0f}ms budget: "
+              f"{over}/{total}" + (f" ({over/total*100:.1f}%)" if total else ""))
+        print("=" * 64)
+
+    # -- FrameProcessor interface ---------------------------------------
+
+    async def process_frame(self, frame: Frame, direction: FrameDirection):
+        await super().process_frame(frame, direction)
+
+        if not isinstance(frame, (AudioRawFrame, InputAudioRawFrame)):
+            await self.push_frame(frame, direction)
+            return
+
+        now = time.perf_counter()
+
+        # inter-frame arrival
+        if self._last_arrival > 0:
+            interval_ms = (now - self._last_arrival) * 1000.0
+            self._window_arrivals.append(interval_ms)
+        self._last_arrival = now
+
+        # queue depth sample
+        qd = self._queue_depth()
+        if qd > self._window_max_qdepth:
+            self._window_max_qdepth = qd
+
+        # start window phase tracking on first frame of window
+        if not self._window:
+            self._window_start_phase = self._state.phase
+
+        # --- the measurement: time the entire downstream chain ---
+        t0 = time.perf_counter()
+        await self.push_frame(frame, direction)
+        elapsed_ms = (time.perf_counter() - t0) * 1000.0
+
+        self._total_frames += 1
+        self._window.append(elapsed_ms)
+        self._phase_samples[self._state.phase].append(elapsed_ms)
+
+        if len(self._window) >= DUTY_CYCLE_WINDOW:
+            self._emit_periodic()
 
 
 # ---------------------------------------------------------------------------
@@ -265,7 +459,8 @@ class RingBufferWriter(FrameProcessor):
 # Command driver — simulates master commands via direct state.set_phase()
 # ---------------------------------------------------------------------------
 
-async def direct_command_driver(state: RecorderStateStub):
+async def direct_command_driver(state: RecorderStateStub,
+                                duty_probe: DutyCycleProbe | None = None):
     """Drive state transitions without a pipe — simulates master commands."""
     await asyncio.sleep(1.0)
     print("[HARNESS] Setting phase to wake_listen")
@@ -300,6 +495,9 @@ async def direct_command_driver(state: RecorderStateStub):
 # Main
 # ---------------------------------------------------------------------------
 
+ENABLE_DUTY_CYCLE = os.environ.get("ENABLE_DUTY_CYCLE", "0") == "1"
+
+
 async def main():
     state = RecorderStateStub()
 
@@ -323,13 +521,23 @@ async def main():
 
     input_transport = transport.input()
 
+    duty_probe = None
+    if ENABLE_DUTY_CYCLE:
+        duty_probe = DutyCycleProbe(state=state, transport_input=input_transport)
+
     # Wire state refs
     state.set_transport(input_transport)
     state.set_vad(vad_processor)
     state.set_oww(wake_processor)
     state.set_ring_writer(ring_writer)
 
-    pipeline = Pipeline([input_transport, vad_processor, wake_processor, ring_writer])
+    # Compose pipeline — duty cycle probe is inserted only when enabled
+    processors = [input_transport]
+    if duty_probe:
+        processors.append(duty_probe)
+    processors.extend([vad_processor, wake_processor, ring_writer])
+
+    pipeline = Pipeline(processors)
     runner = PipelineRunner()
     task = PipelineTask(pipeline)
 
@@ -348,6 +556,9 @@ async def main():
     print("EU-3c Track 2 -- Pipecat pipeline harness (single process)")
     print("  Say 'hey Jarvis', speak, then pause.")
     print("  3 wake->capture->VAD cycles, then exit.")
+    if duty_probe:
+        print(f"  Duty cycle probe ENABLED  (window={DUTY_CYCLE_WINDOW} frames, "
+              f"budget={FRAME_DURATION_MS:.0f}ms)")
     print("  Press Ctrl+C to exit early.\n")
 
     loop = asyncio.get_running_loop()
@@ -362,7 +573,7 @@ async def main():
     for sig in (signal.SIGINT, signal.SIGTERM):
         loop.add_signal_handler(sig, partial(signal_handler, sig.name))
 
-    driver = asyncio.create_task(direct_command_driver(state))
+    driver = asyncio.create_task(direct_command_driver(state, duty_probe))
 
     try:
         await runner.run(task)
@@ -370,6 +581,8 @@ async def main():
         print("\nPipeline cancelled.")
     finally:
         driver.cancel()
+        if duty_probe:
+            duty_probe.print_final_summary()
         for sig in (signal.SIGINT, signal.SIGTERM):
             loop.remove_signal_handler(sig)
         print("\nEU-3c harness finished.")
