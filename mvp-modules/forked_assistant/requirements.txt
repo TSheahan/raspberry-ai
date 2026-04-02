@@ -1,0 +1,37 @@
+# forked_assistant — Python dependencies
+#
+# Authoritative source: ~/pipecat-agent/venv/ on morpheus (Pi 4, ARM64, Raspberry Pi OS Trixie).
+# Version pins reflect pip freeze from that venv. Do not change pins without verifying on Pi first.
+#
+# Primary purpose of a local install: source access and IDE navigation.
+# Matching pipecat-ai and openwakeword versions ensures the IDE resolves the
+# same API that runs on the Pi. Execution on Windows is a secondary concern —
+# the harness requires Pi hardware (ReSpeaker, ALSA) to run meaningfully.
+#
+# Platform notes
+# --------------
+# PyAudio (0.2.14)
+#   C extension wrapping PortAudio. On Pi: ALSA-backed, install as-is.
+#   On Windows: pre-built wheel available on PyPI for Python 3.13 — installs
+#   cleanly with no PortAudio SDK required (verified 2026-04-02).
+#
+# torch (2.11.0)
+#   Pi freeze records 2.11.0+cpu — a local version label from PyTorch's CPU
+#   wheel index, not a standard PyPI qualifier. Heavy (~2 GB); not required
+#   for IDE source navigation of the harness itself.
+#   To install: pip install torch==2.11.0 --index-url https://download.pytorch.org/whl/cpu
+#
+# audioop-lts (0.2.2)
+#   Backport of the audioop C module removed from stdlib in Python 3.13.
+#   Required by PyAudio on Python 3.13+.
+
+# --- Source-critical: install these for IDE parity with Pi ---
+pipecat-ai==0.0.108
+openwakeword==0.4.0
+numpy==2.4.3
+PyAudio==0.2.14
+audioop-lts==0.2.2
+
+# --- Runtime deps: needed for execution, optional for source navigation ---
+onnxruntime==1.23.2
+# torch==2.11.0   (see platform note; install separately with --index-url)

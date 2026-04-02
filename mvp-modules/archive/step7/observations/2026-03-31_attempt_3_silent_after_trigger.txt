@@ -1,0 +1,105 @@
+(venv) user@morpheus:~/pre-design-demos/e2e-pipeline-integration $ python voice_pipeline_step7.py
+2026-03-31 21:47:06.194715924 [W:onnxruntime:Default, device_discovery.cc:164 DiscoverDevicesForPlatform] GPU device discovery failed: device_discovery.cc:89 ReadFileContents Failed to open file: "/sys/class/drm/card1/device/vendor"
+2026-03-31 21:47:09.620 | INFO     | pipecat:<module>:14 - ᓚᘏᗢ Pipecat 0.0.108 (Python 3.13.5 (main, Jun 25 2025, 18:55:22) [GCC 14.2.0]) ᓚᘏᗢ
+ALSA lib pcm.c:2722:(snd_pcm_open_noupdate) Unknown PCM cards.pcm.front
+ALSA lib pcm.c:2722:(snd_pcm_open_noupdate) Unknown PCM cards.pcm.rear
+ALSA lib pcm.c:2722:(snd_pcm_open_noupdate) Unknown PCM cards.pcm.center_lfe
+ALSA lib pcm.c:2722:(snd_pcm_open_noupdate) Unknown PCM cards.pcm.side
+ALSA lib pcm.c:2722:(snd_pcm_open_noupdate) Unknown PCM cards.pcm.surround21
+ALSA lib pcm.c:2722:(snd_pcm_open_noupdate) Unknown PCM cards.pcm.surround21
+ALSA lib pcm.c:2722:(snd_pcm_open_noupdate) Unknown PCM cards.pcm.surround40
+ALSA lib pcm.c:2722:(snd_pcm_open_noupdate) Unknown PCM cards.pcm.surround41
+ALSA lib pcm.c:2722:(snd_pcm_open_noupdate) Unknown PCM cards.pcm.surround50
+ALSA lib pcm.c:2722:(snd_pcm_open_noupdate) Unknown PCM cards.pcm.surround51
+ALSA lib pcm.c:2722:(snd_pcm_open_noupdate) Unknown PCM cards.pcm.surround71
+ALSA lib pcm.c:2722:(snd_pcm_open_noupdate) Unknown PCM cards.pcm.iec958
+ALSA lib pcm.c:2722:(snd_pcm_open_noupdate) Unknown PCM cards.pcm.iec958
+ALSA lib pcm.c:2722:(snd_pcm_open_noupdate) Unknown PCM cards.pcm.iec958
+ALSA lib confmisc.c:1377:(snd_func_refer) Unable to find definition 'cards.0.pcm.hdmi.0:CARD=0,AES0=4,AES1=130,AES2=0,AES3=2'
+ALSA lib conf.c:5205:(_snd_config_evaluate) function snd_func_refer returned error: No such file or directory
+ALSA lib conf.c:5728:(snd_config_expand) Evaluate error: No such file or directory
+ALSA lib pcm.c:2722:(snd_pcm_open_noupdate) Unknown PCM hdmi
+ALSA lib confmisc.c:1377:(snd_func_refer) Unable to find definition 'cards.0.pcm.hdmi.0:CARD=0,AES0=4,AES1=130,AES2=0,AES3=2'
+ALSA lib conf.c:5205:(_snd_config_evaluate) function snd_func_refer returned error: No such file or directory
+ALSA lib conf.c:5728:(snd_config_expand) Evaluate error: No such file or directory
+ALSA lib pcm.c:2722:(snd_pcm_open_noupdate) Unknown PCM hdmi
+ALSA lib pcm.c:2722:(snd_pcm_open_noupdate) Unknown PCM cards.pcm.modem
+ALSA lib pcm.c:2722:(snd_pcm_open_noupdate) Unknown PCM cards.pcm.modem
+ALSA lib pcm.c:2722:(snd_pcm_open_noupdate) Unknown PCM cards.pcm.phoneline
+ALSA lib pcm.c:2722:(snd_pcm_open_noupdate) Unknown PCM cards.pcm.phoneline
+Cannot connect to server socket err = No such file or directory
+Cannot connect to server request channel
+jack server is not running or cannot be started
+JackShmReadWritePtr::~JackShmReadWritePtr - Init not done for -1, skipping unlock
+JackShmReadWritePtr::~JackShmReadWritePtr - Init not done for -1, skipping unlock
+Cannot connect to server socket err = No such file or directory
+Cannot connect to server request channel
+jack server is not running or cannot be started
+JackShmReadWritePtr::~JackShmReadWritePtr - Init not done for -1, skipping unlock
+JackShmReadWritePtr::~JackShmReadWritePtr - Init not done for -1, skipping unlock
+ALSA lib pcm_oss.c:404:(_snd_pcm_oss_open) Cannot open device /dev/dsp
+ALSA lib pcm_oss.c:404:(_snd_pcm_oss_open) Cannot open device /dev/dsp
+ALSA lib pulse.c:242:(pulse_connect) PulseAudio: Unable to connect: Connection refused
+
+ALSA lib pulse.c:242:(pulse_connect) PulseAudio: Unable to connect: Connection refused
+
+ALSA lib pcm_a52.c:1036:(_snd_pcm_a52_open) a52 is only for playback
+ALSA lib conf.c:5695:(snd_config_expand) Unknown parameters {AES0 0x6 AES1 0x82 AES2 0x0 AES3 0x2 CARD 0}
+ALSA lib pcm.c:2722:(snd_pcm_open_noupdate) Unknown PCM iec958:{AES0 0x6 AES1 0x82 AES2 0x0 AES3 0x2 CARD 0}
+ALSA lib confmisc.c:160:(snd_config_get_card) Invalid field card
+ALSA lib pcm_usb_stream.c:481:(_snd_pcm_usb_stream_open) Invalid card 'card'
+ALSA lib confmisc.c:160:(snd_config_get_card) Invalid field card
+ALSA lib pcm_usb_stream.c:481:(_snd_pcm_usb_stream_open) Invalid card 'card'
+ALSA lib confmisc.c:165:(snd_config_get_card) Cannot get card index for ALSA
+ALSA lib confmisc.c:165:(snd_config_get_card) Cannot get card index for ALSA
+ALSA lib confmisc.c:165:(snd_config_get_card) Cannot get card index for ALSA
+Cannot connect to server socket err = No such file or directory
+Cannot connect to server request channel
+jack server is not running or cannot be started
+JackShmReadWritePtr::~JackShmReadWritePtr - Init not done for -1, skipping unlock
+JackShmReadWritePtr::~JackShmReadWritePtr - Init not done for -1, skipping unlock
+2026-03-31 21:47:12.483 | DEBUG    | pipecat.audio.vad.silero:__init__:147 - Loading Silero VAD model...
+2026-03-31 21:47:12.760 | DEBUG    | pipecat.audio.vad.silero:__init__:169 - Loaded Silero VAD
+Loading openwakeword models...
+/home/user/pipecat-agent/venv/lib/python3.13/site-packages/onnxruntime/capi/onnxruntime_inference_collection.py:123: UserWarning: Specified provider 'CUDAExecutionProvider' is not in available provider names.Available providers: 'AzureExecutionProvider, CPUExecutionProvider'
+  warnings.warn(
+openwakeword ready
+2026-03-31 21:47:14.749 | DEBUG    | pipecat.processors.frame_processor:link:589 - Linking Pipeline#0::Source -> LocalAudioInputTransport#0
+2026-03-31 21:47:14.750 | DEBUG    | pipecat.processors.frame_processor:link:589 - Linking LocalAudioInputTransport#0 -> VADProcessor#0
+2026-03-31 21:47:14.750 | DEBUG    | pipecat.processors.frame_processor:link:589 - Linking VADProcessor#0 -> OpenWakeWordProcessor#0
+2026-03-31 21:47:14.750 | DEBUG    | pipecat.processors.frame_processor:link:589 - Linking OpenWakeWordProcessor#0 -> UtteranceCapturer#0
+2026-03-31 21:47:14.750 | DEBUG    | pipecat.processors.frame_processor:link:589 - Linking UtteranceCapturer#0 -> Pipeline#0::Sink
+2026-03-31 21:47:14.751 | DEBUG    | pipecat.processors.frame_processor:link:589 - Linking PipelineTask#0::Source -> RTVIProcessor#0
+2026-03-31 21:47:14.752 | DEBUG    | pipecat.processors.frame_processor:link:589 - Linking RTVIProcessor#0 -> Pipeline#0
+2026-03-31 21:47:14.752 | DEBUG    | pipecat.processors.frame_processor:link:589 - Linking Pipeline#0 -> PipelineTask#0::Sink
+Step 7 -- Wake word + VAD + STT + Claude
+   Say 'hey Jarvis', speak your question, then pause.
+   VAD will detect end of utterance automatically.
+   Press Ctrl+C to exit.
+
+Listening for wake word...
+2026-03-31 21:47:14.752 | DEBUG    | pipecat.pipeline.runner:run:71 - Runner PipelineRunner#0 started running PipelineTask#0
+2026-03-31 21:47:14.754 | DEBUG    | pipecat.pipeline.task:_wait_for_pipeline_start:745 - PipelineTask#0: Starting. Waiting for StartFrame#0 to reach the end of the pipeline...
+2026-03-31 21:47:14.764 | DEBUG    | pipecat.audio.vad.vad_analyzer:set_params:156 - Setting VAD params to: confidence=0.7 start_secs=0.2 stop_secs=0.8 min_volume=0.6
+2026-03-31 21:47:14.766 | DEBUG    | pipecat.pipeline.task:_wait_for_pipeline_start:748 - PipelineTask#0: StartFrame#0 reached the end of the pipeline, pipeline is now ready.
+2026-03-31 21:47:18.094 | DEBUG    | pipecat.processors.audio.vad_processor:on_speech_started:66 - VADProcessor#0: User started speaking
+
+WAKE DETECTED -- 'hey_jarvis'  |  score: 0.951
+  Listening for utterance... (speak now)
+2026-03-31 21:47:19.309 | DEBUG    | pipecat.processors.audio.vad_processor:on_speech_stopped:74 - VADProcessor#0: User stopped speaking
+  Utterance captured: 0.8s
+  Sending audio to Deepgram Nova-3...
+  No transcript returned.
+
+
+^C2026-03-31 21:47:29.702 | WARNING  | pipecat.pipeline.runner:_sig_cancel:136 - Interruption detected. Cancelling runner PipelineRunner#0
+2026-03-31 21:47:29.702 | DEBUG    | pipecat.pipeline.runner:cancel:104 - Cancelling runner PipelineRunner#0
+2026-03-31 21:47:29.703 | DEBUG    | pipecat.pipeline.task:_cancel:673 - Cancelling pipeline task PipelineTask#0
+2026-03-31 21:47:29.703 | DEBUG    | pipecat.pipeline.task:_wait_for_pipeline_end:767 - PipelineTask#0: Closing. Waiting for CancelFrame#0(reason: None) to reach the end of the pipeline...
+2026-03-31 21:47:29.711 | DEBUG    | pipecat.pipeline.task:wait_for_cancel:758 - PipelineTask#0: CancelFrame#0(reason: None) reached the end of the pipeline.
+2026-03-31 21:47:29.748 | DEBUG    | pipecat.pipeline.task:run:621 - Pipeline task PipelineTask#0 is finishing...
+2026-03-31 21:47:29.749 | DEBUG    | pipecat.pipeline.task:run:626 - Pipeline task PipelineTask#0 has finished
+2026-03-31 21:47:29.749 | DEBUG    | pipecat.pipeline.runner:run:95 - Runner PipelineRunner#0 finished running PipelineTask#0
+
+Step 7 finished cleanly.
+(venv) user@morpheus:~/pre-design-demos/e2e-pipeline-integration $

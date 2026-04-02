@@ -1,0 +1,32 @@
+2026-03-31 13:09:56.336 | DEBUG    | pipecat.processors.frame_processor:link:589 - Linking Pipeline#0::Source -> LocalAudioInputTransport#0
+2026-03-31 13:09:56.337 | DEBUG    | pipecat.processors.frame_processor:link:589 - Linking LocalAudioInputTransport#0 -> OpenWakeWordProcessor#0
+2026-03-31 13:09:56.337 | DEBUG    | pipecat.processors.frame_processor:link:589 - Linking OpenWakeWordProcessor#0 -> UtteranceCapturer#0
+2026-03-31 13:09:56.337 | DEBUG    | pipecat.processors.frame_processor:link:589 - Linking UtteranceCapturer#0 -> DeepgramSTTProcessor#0
+2026-03-31 13:09:56.337 | DEBUG    | pipecat.processors.frame_processor:link:589 - Linking DeepgramSTTProcessor#0 -> Pipeline#0::Sink
+2026-03-31 13:09:56.339 | DEBUG    | pipecat.processors.frame_processor:link:589 - Linking PipelineTask#0::Source -> RTVIProcessor#0
+2026-03-31 13:09:56.339 | DEBUG    | pipecat.processors.frame_processor:link:589 - Linking RTVIProcessor#0 -> Pipeline#0
+2026-03-31 13:09:56.339 | DEBUG    | pipecat.processors.frame_processor:link:589 - Linking Pipeline#0 -> PipelineTask#0::Sink
+Incremental v7 (v6 + class definition reorder): Listening...
+   Say 'hey Jarvis', speak a short sentence, then Ctrl+C to test shutdown.
+   Press Ctrl+C to test shutdown.
+
+2026-03-31 13:09:56.339 | DEBUG    | pipecat.pipeline.runner:run:71 - Runner PipelineRunner#0 started running PipelineTask#0
+2026-03-31 13:09:56.341 | DEBUG    | pipecat.pipeline.task:_wait_for_pipeline_start:745 - PipelineTask#0: Starting. Waiting for StartFrame#0 to reach the end of the pipeline...
+2026-03-31 13:09:56.351 | DEBUG    | pipecat.pipeline.task:_wait_for_pipeline_start:748 - PipelineTask#0: StartFrame#0 reached the end of the pipeline, pipeline is now ready.
+
+WAKE DETECTED -- 'hey_jarvis'  |  score: 0.635
+^C2026-03-31 13:09:59.839 | WARNING  | pipecat.pipeline.runner:_sig_cancel:136 - Interruption detected. Cancelling runner PipelineRunner#0
+2026-03-31 13:09:59.839 | DEBUG    | pipecat.pipeline.runner:cancel:104 - Cancelling runner PipelineRunner#0
+2026-03-31 13:09:59.840 | DEBUG    | pipecat.pipeline.task:_cancel:673 - Cancelling pipeline task PipelineTask#0
+2026-03-31 13:09:59.840 | DEBUG    | pipecat.pipeline.task:_wait_for_pipeline_end:767 - PipelineTask#0: Closing. Waiting for CancelFrame#0(reason: None) to reach the end of the pipeline...
+2026-03-31 13:09:59.843 | DEBUG    | pipecat.pipeline.task:wait_for_cancel:758 - PipelineTask#0: CancelFrame#0(reason: None) reached the end of the pipeline.
+2026-03-31 13:09:59.854 | DEBUG    | pipecat.pipeline.task:run:621 - Pipeline task PipelineTask#0 is finishing...
+2026-03-31 13:09:59.855 | DEBUG    | pipecat.pipeline.task:run:626 - Pipeline task PipelineTask#0 has finished
+2026-03-31 13:09:59.855 | DEBUG    | pipecat.pipeline.runner:run:95 - Runner PipelineRunner#0 finished running PipelineTask#0
+
+Running final transcription...
+Sending audio to Deepgram Nova-3...
+
+TRANSCRIPT: Hello.
+Incremental v7 finished cleanly -- process should exit now.
+(venv) user@morpheus:~/pre-design-demos/e2e-pipeline-integration $

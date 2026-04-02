@@ -1,0 +1,20 @@
+2026-03-31 13:13:06.453 | DEBUG    | pipecat.processors.frame_processor:link:589 - Linking Pipeline#0::Source -> LocalAudioInputTransport#0
+2026-03-31 13:13:06.453 | DEBUG    | pipecat.processors.frame_processor:link:589 - Linking LocalAudioInputTransport#0 -> OpenWakeWordProcessor#0
+2026-03-31 13:13:06.453 | DEBUG    | pipecat.processors.frame_processor:link:589 - Linking OpenWakeWordProcessor#0 -> UtteranceCapturer#0
+2026-03-31 13:13:06.454 | DEBUG    | pipecat.processors.frame_processor:link:589 - Linking UtteranceCapturer#0 -> DeepgramSTTProcessor#0
+2026-03-31 13:13:06.454 | DEBUG    | pipecat.processors.frame_processor:link:589 - Linking DeepgramSTTProcessor#0 -> Pipeline#0::Sink
+2026-03-31 13:13:06.455 | DEBUG    | pipecat.processors.frame_processor:link:589 - Linking PipelineTask#0::Source -> RTVIProcessor#0
+2026-03-31 13:13:06.455 | DEBUG    | pipecat.processors.frame_processor:link:589 - Linking RTVIProcessor#0 -> Pipeline#0
+2026-03-31 13:13:06.456 | DEBUG    | pipecat.processors.frame_processor:link:589 - Linking Pipeline#0 -> PipelineTask#0::Sink
+Incremental v8a (v7 + method naming/comments): Listening...
+   Say 'hey Jarvis', speak a short sentence, then Ctrl+C to test shutdown.
+   Press Ctrl+C to test shutdown.
+
+2026-03-31 13:13:06.456 | DEBUG    | pipecat.pipeline.runner:run:71 - Runner PipelineRunner#0 started running PipelineTask#0
+2026-03-31 13:13:06.457 | DEBUG    | pipecat.pipeline.task:_wait_for_pipeline_start:745 - PipelineTask#0: Starting. Waiting for StartFrame#0 to reach the end of the pipeline...
+
+WAKE DETECTED -- 'hey_jarvis'  |  score: 0.958
+^C2026-03-31 13:13:10.291 | WARNING  | pipecat.pipeline.runner:_sig_cancel:136 - Interruption detected. Cancelling runner PipelineRunner#0
+2026-03-31 13:13:10.292 | DEBUG    | pipecat.pipeline.runner:cancel:104 - Cancelling runner PipelineRunner#0
+2026-03-31 13:13:10.292 | DEBUG    | pipecat.pipeline.task:_cancel:673 - Cancelling pipeline task PipelineTask#0
+Terminated

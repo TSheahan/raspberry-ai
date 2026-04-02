@@ -1,0 +1,46 @@
+2026-03-31 22:17:13.058 | DEBUG    | pipecat.processors.frame_processor:link:589 - Linking Pipeline#0::Source -> LocalAudioInputTransport#0
+2026-03-31 22:17:13.059 | DEBUG    | pipecat.processors.frame_processor:link:589 - Linking LocalAudioInputTransport#0 -> GatedVADProcessor#0
+2026-03-31 22:17:13.059 | DEBUG    | pipecat.processors.frame_processor:link:589 - Linking GatedVADProcessor#0 -> OpenWakeWordProcessor#0
+2026-03-31 22:17:13.059 | DEBUG    | pipecat.processors.frame_processor:link:589 - Linking OpenWakeWordProcessor#0 -> UtteranceCapturer#0
+2026-03-31 22:17:13.059 | DEBUG    | pipecat.processors.frame_processor:link:589 - Linking UtteranceCapturer#0 -> Pipeline#0::Sink
+2026-03-31 22:17:13.065 | DEBUG    | pipecat.processors.frame_processor:link:589 - Linking PipelineTask#0::Source -> RTVIProcessor#0
+2026-03-31 22:17:13.066 | DEBUG    | pipecat.processors.frame_processor:link:589 - Linking RTVIProcessor#0 -> Pipeline#0
+2026-03-31 22:17:13.066 | DEBUG    | pipecat.processors.frame_processor:link:589 - Linking Pipeline#0 -> PipelineTask#0::Sink
+Step 7 -- Wake word + VAD + STT + Claude
+   Say 'hey Jarvis', speak your question, then pause.
+   VAD will detect end of utterance automatically.
+   Press Ctrl+C to exit.
+
+Listening for wake word...
+2026-03-31 22:17:13.066 | DEBUG    | pipecat.pipeline.runner:run:71 - Runner PipelineRunner#0 started running PipelineTask#0
+2026-03-31 22:17:13.070 | DEBUG    | pipecat.pipeline.task:_wait_for_pipeline_start:745 - PipelineTask#0: Starting. Waiting for StartFrame#0 to reach the end of the pipeline...
+2026-03-31 22:17:13.083 | DEBUG    | pipecat.audio.vad.vad_analyzer:set_params:156 - Setting VAD params to: confidence=0.7 start_secs=0.2 stop_secs=0.8 min_volume=0.6
+2026-03-31 22:17:13.085 | DEBUG    | pipecat.pipeline.task:_wait_for_pipeline_start:748 - PipelineTask#0: StartFrame#0 reached the end of the pipeline, pipeline is now ready.
+
+WAKE DETECTED -- 'hey_jarvis'  |  score: 0.665
+  Listening for utterance... (speak now)
+  Utterance captured: 2.3s
+  Sending audio to Deepgram Nova-3...
+  TRANSCRIPT: Can you hear me?
+  STT latency: 2.29s
+
+  CLAUDE RESPONSE:
+  Yep, I'm here! Ready to help with your e2e-pipeline-integration project. What do you need?
+
+  Claude latency: 9.85s
+  Total loop latency: 12.14s
+
+Listening for wake word...
+
+WAKE DETECTED -- 'hey_jarvis'  |  score: 0.865
+  Listening for utterance... (speak now)
+
+
+
+
+^C2026-03-31 22:17:52.834 | WARNING  | pipecat.pipeline.runner:_sig_cancel:136 - Interruption detected. Cancelling runner PipelineRunner#0
+2026-03-31 22:17:52.834 | DEBUG    | pipecat.pipeline.runner:cancel:104 - Cancelling runner PipelineRunner#0
+2026-03-31 22:17:52.836 | DEBUG    | pipecat.pipeline.task:_cancel:673 - Cancelling pipeline task PipelineTask#0
+2026-03-31 22:17:52.838 | DEBUG    | pipecat.pipeline.task:_wait_for_pipeline_end:767 - PipelineTask#0: Closing. Waiting for CancelFrame#0(reason: None) to reach the end of the pipeline...
+2026-03-31 22:17:52.848 | DEBUG    | pipecat.pipeline.task:wait_for_cancel:758 - PipelineTask#0: CancelFrame#0(reason: None) reached the end of the pipeline.
+client_loop: send disconnect: Connection reset

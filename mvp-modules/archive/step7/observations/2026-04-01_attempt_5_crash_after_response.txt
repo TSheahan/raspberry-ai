@@ -1,0 +1,23 @@
+2026-04-01 07:00:28.843 | DEBUG    | pipecat.pipeline.task:_wait_for_pipeline_start:748 - PipelineTask#0: StartFrame#0 reached the end of the pipeline, pipeline is now ready.
+
+WAKE DETECTED -- 'hey_jarvis'  |  score: 0.670
+  Listening for utterance... (speak now)
+  Utterance captured: 1.8s
+  Sending audio to Deepgram Nova-3...
+  TRANSCRIPT: Can you hear me?
+  STT latency: 2.58s
+
+  CLAUDE RESPONSE:
+  Yes, I can hear you! I'm ready to help. What would you like to work on?
+
+  Claude latency: 4.97s
+  Total loop latency: 7.56s
+
+Listening for wake word...
+  (OWW model state fully reset)
+^C2026-04-01 07:01:11.871 | WARNING  | pipecat.pipeline.runner:_sig_cancel:136 - Interruption detected. Cancelling runner PipelineRunner#0
+2026-04-01 07:01:11.871 | DEBUG    | pipecat.pipeline.runner:cancel:104 - Cancelling runner PipelineRunner#0
+2026-04-01 07:01:11.872 | DEBUG    | pipecat.pipeline.task:_cancel:673 - Cancelling pipeline task PipelineTask#0
+2026-04-01 07:01:11.873 | DEBUG    | pipecat.pipeline.task:_wait_for_pipeline_end:767 - PipelineTask#0: Closing. Waiting for CancelFrame#0(reason: None) to reach the end of the pipeline...
+2026-04-01 07:01:11.879 | DEBUG    | pipecat.pipeline.task:wait_for_cancel:758 - PipelineTask#0: CancelFrame#0(reason: None) reached the end of the pipeline.
+client_loop: send disconnect: Connection reset
