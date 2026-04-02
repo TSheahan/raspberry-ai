@@ -61,24 +61,32 @@ Pinning prevents the OS scheduler from migrating the recorder process during a l
 
 ## ReSpeaker Audio Configuration — Resolved (P-1 2026-04-02)
 
-**Status: closed. 1-ch at 16kHz is confirmed correct and is the only working configuration.**
+**Status: closed. 1-ch at 16kHz is the correct and sufficient configuration for all pipeline stages.**
+
+**Driver note:** Raspberry Pi OS Trixie uses the [HinTak community fork](https://github.com/HinTak/seeed-voicecard) of seeed-voicecard for current-kernel compatibility. Same `asound_4mic.conf` / `ac108` plug structure as the original.
 
 **P-1 findings (`test/smoke_respeaker_channels.py` run on Pi 2026-04-02):**
 
 - Device: `seeed-4mic-voicecard: bcm2835-i2s-ac10x-codec0 (hw:3,0)`, 4 max input channels, 44100 Hz native default
-- 1-ch @ 16kHz: opens OK, delivers real audio (plausible noise floor samples)
+- 1-ch @ 16kHz: opens OK, delivers real audio (plausible noise floor samples) ✓
 - 2-ch @ 16kHz: opens without error, correct byte count, but delivers silence even with sound present
 - 4-ch @ 16kHz: same — opens without error, silence only
 
-The seeed ALSA driver accepts 2-ch and 4-ch opens at 16kHz silently but only activates real capture on the 1-ch path. The large values seen in the initial 2-ch read were a stream initialization artifact (stale DMA buffer); confirmed silence on re-run with audio present.
+The silence on 2-ch/4-ch is a **format mismatch**, not a hardware limit. The AC108 codec outputs S32_LE natively. P-1 probed with `paInt16`. The `hw:` ALSA device cannot serve S16_LE and returns zero-filled buffers silently. The 1-ch path works because `/etc/asound.conf` routes it through the `ac108` plug PCM, which performs S32_LE→S16_LE conversion. The large values in the initial 2-ch read were a stream initialization artifact (stale DMA buffer).
 
-The driver performs sample-rate conversion from the 44100 Hz hardware default to 16kHz on the 1-ch path. This is transparent to the application and confirmed working.
+4-ch capture **is technically available** via `paInt32` (or `alsaaudio` with `PCM_FORMAT_S32_LE`) targeting the `ac108` named ALSA device — the seeed wiki documents `arecord -Dac108 -f S32_LE -r 16000 -c 4` as the canonical command. This path is not currently pursued (see design decision below).
 
-**Consequences:**
-- `LocalAudioTransport` with no explicit `channels=` (Pipecat default = 1) is on the only valid path
-- All ring buffer, OWW, and Silero math assuming 16kHz int16 mono is correct
-- VAD sensitivity issues are not channel-packing symptoms — investigate Silero params/thresholds
-- **P-2 (beamform shim) is cancelled.** Software beam-forming requires working 4-ch capture, which is not available at 16kHz in this driver. Individual mic channels are inaccessible without opening at 44100 Hz and doing manual SRC — not warranted unless detection quality proves insufficient.
+**Design decision: 1-ch mono for all three pipeline stages**
+
+OWW, VAD, and STT all use the same 1-ch 16kHz stream. This is a deliberate choice, not a fallback:
+
+- **OWW**: designed for mono 16kHz — no adjustment needed or wanted
+- **VAD**: an overlay on the capture stream; already functional, tunable via Silero params; the sensitivity question is not a channel issue
+- **STT**: 1-ch mono is sufficient for transcript quality; adding channels multiplies ring buffer data volume and risks ALSA buffer overruns for marginal acoustic gain
+
+The ring buffer architecture preserves the option to switch to multi-channel capture in the future (e.g., for beam-forming quality uplift) without changing the master or the signal protocol. That option is not exercised now.
+
+**P-2 (beamform shim) is not pursued.** The prerequisite for P-2 was genuine multi-channel capture being necessary — it is not. VAD sensitivity issues are not channel-packing symptoms; investigate Silero params/thresholds directly.
 
 ## Why Recorder Is Capture-Only
 

@@ -218,9 +218,9 @@ Status column: **not started** / in progress / complete.
 | ID | Deliverable | Goal | Status |
 |----|-------------|------|--------|
 | P-1 | `test/smoke_respeaker_channels.py` | Determine actual channel count delivered by PyAudio for device index 1. The ring buffer and all inference code assume 16 kHz int16 mono. If the ReSpeaker presents as multi-channel, all downstream processing is silently wrong. | complete — executed 2026-04-02 |
-| P-2 | `test/smoke_beamform_shim.py` | If P-1 shows multi-channel data: prove that a channel-extraction shim (or USB tuning module beam-forming) produces clean mono that OWW and Silero respond to correctly. Answers: "do Track 2 results hold with correct channel handling?" | **cancelled** — P-1 showed 2-ch/4-ch deliver silence; beam-forming path unavailable at 16kHz |
+| P-2 | `test/smoke_beamform_shim.py` | If P-1 shows multi-channel data: prove that a channel-extraction shim (or USB tuning module beam-forming) produces clean mono that OWW and Silero respond to correctly. Answers: "do Track 2 results hold with correct channel handling?" | **not pursued** — 1-ch mono is sufficient for OWW, VAD, and STT; multi-channel not warranted |
 
-**P-1 result (2026-04-02):** 1-ch at 16kHz is the only configuration that delivers real audio. 2-ch and 4-ch open without error but produce silence even with sound present — driver limitation. VAD sensitivity is not a channel-packing symptom; investigate Silero params/thresholds directly. See `memory/architecture_decisions.md` for full findings.
+**P-1 result (2026-04-02):** 1-ch at 16kHz delivers real audio and is the correct path for all three pipeline stages (OWW, VAD, STT). 2-ch/4-ch silence in the probe was a format mismatch (P-1 used paInt16; AC108 natively outputs S32_LE); 4-ch capture is technically available via S32_LE + `ac108` ALSA device but is not pursued — adding channels risks buffer overruns for marginal STT gain. VAD sensitivity is not a channel-packing symptom. See `memory/architecture_decisions.md` for full findings and design rationale.
 
 **What P-1 should do:**
 - Open PyAudio, print full device info for index 1 (max input channels, default sample rate)
