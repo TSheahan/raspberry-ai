@@ -189,7 +189,7 @@ Duty cycle measurement revealed OWW `model.predict()` blocked the event loop for
 
 **Goal:** Build the master process with batch-mode utterance processing (current STT + Claude pattern).
 
-**Deliverable:** `forked_assistant/master.py` — the main entry point that:
+**Deliverable:** `src/master.py` — the main entry point that:
 1. Creates SharedMemory and Pipe
 2. Spawns recorder child, pins to core 0
 3. Sends SET_WAKE_LISTEN
@@ -202,6 +202,12 @@ Duty cycle measurement revealed OWW `model.predict()` blocked the event loop for
 - The cognitive loop (`_transcribe` + `run_claude`) can be lifted almost verbatim from v10a's `UtteranceCapturer._cognitive_loop` and `_transcribe`
 - `asyncio.to_thread` for blocking STT and Claude calls, same as v10a
 - Ring buffer read replaces the `self._chunks` accumulation pattern
+
+**EU-4 code complete (2026-04-03), pending Pi validation.**
+
+Master is synchronous (no asyncio in the master process). The event loop blocks on `pipe.recv()`, processes signals, and runs the cognitive loop inline. During the cognitive loop, the recorder child is already back in `wake_listen` (SET_WAKE_LISTEN is sent before the cognitive loop starts). Pipe messages from the child buffer in the kernel during processing; drained on return. A `processing` flag gates WAKE_DETECTED to prevent overlapping cognitive loops.
+
+STT uses `DeepgramClient.listen.rest.v("1").transcribe_file()` (file-based batch API). Claude uses `claude -p` subprocess, same as v10a.
 
 **Estimated scope:** ~120 lines. One session, assuming EU-3 is proven.
 

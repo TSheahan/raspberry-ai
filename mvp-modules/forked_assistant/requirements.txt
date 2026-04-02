@@ -35,3 +35,7 @@ audioop-lts==0.2.2
 # --- Runtime deps: needed for execution, optional for source navigation ---
 onnxruntime==1.23.2
 # torch==2.11.0   (see platform note; install separately with --index-url)
+
+# --- EU-4 additions: already installed in Pi venv, no pin until verified ---
+deepgram-sdk
+python-dotenv
