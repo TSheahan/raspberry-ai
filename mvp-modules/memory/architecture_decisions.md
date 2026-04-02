@@ -88,6 +88,28 @@ The ring buffer architecture preserves the option to switch to multi-channel cap
 
 **P-2 (beamform shim) is not pursued.** The prerequisite for P-2 was genuine multi-channel capture being necessary — it is not. VAD sensitivity issues are not channel-packing symptoms; investigate Silero params/thresholds directly.
 
+**Channel provenance — ADC1 (channel 0) only (~90% certainty, 2026-04-02)**
+
+The `ac108` plug has no `ttable` (routing table). ALSA's default plug behaviour for N→1 channel reduction is to take channel 0 and discard the rest. Tap probe testing (touching each of the 4 mic positions in turn while monitoring 1-ch RMS) showed one position clearly dominant, the other three producing significantly lower response. Confirmed with ~90% certainty: the 1-ch stream captures from ADC1 only, one physical microphone, not a mix.
+
+Implication: microphone physical orientation on the hat matters. If the hat is mounted with ADC1 pointing away from the speaker, sensitivity will be reduced. This is a physical placement concern, not a software one.
+
+**PGA gain investigation — closed, no software lever available (2026-04-02)**
+
+AC108 state from `/etc/voicecard/ac108_asound.state`:
+- ADC1–4 PGA gain: **0 dB** (value 0, dbvalue 0) on all four channels
+- ADC1–4 digital volume: **47.25 dB** (value 222, dbvalue 4725) — the active gain stage
+
+PGA changes tested via `amixer -c 3 sset 'ADC1 PGA gain'` at 0, 10, 20, and 28 dB. In all four runs, the ambient noise floor remained constant at ~56 RMS (seconds of silence measured consistently). If the PGA were in the 1-ch signal path, the noise floor would scale proportionally — at 28 dB it should reach ~1400. It did not.
+
+**Conclusion: the PGA is not in the 1-ch ALSA plug path as accessed.** The `ac108` plug sources audio from a point in the codec chain that is downstream of the PGA, or the amixer writes don't propagate to the hardware register. Either way, PGA adjustment has no effect on the 1-ch output. The 47.25 dB ADC digital volume is the effective and fixed gain stage.
+
+No viable software audio quality lever exists within the current driver and ALSA configuration. Further uplift would require direct AC108 register manipulation or opening at 44100 Hz 4-ch (S32_LE) and doing channel selection and SRC in application code — not warranted given STT results are already good.
+
+**STT quality confirmed sufficient (2026-04-02)**
+
+Deepgram batch-mode STT on captures from this pipeline returns good transcripts. Audio quality is not the current bottleneck. The mono path at 16kHz, as configured by the seeed-voicecard installer, is adequate for the intended use case.
+
 ## Why Recorder Is Capture-Only
 
 The recorder child owns the microphone and nothing else. Playback (TTS) belongs to the master or a future separate process. This keeps the child simple and aligned with the ReSpeaker hat's input-focused design. It also avoids bidirectional audio I/O races in the same process.

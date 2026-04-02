@@ -72,7 +72,7 @@ Two hardware-probe scripts are tracked in `spec/implementation_framework.md` und
 | P-1 | `test/smoke_respeaker_channels.py` | complete — executed 2026-04-02 |
 | P-2 | `test/smoke_beamform_shim.py` | cancelled |
 
-**P-1 result:** 1-ch at 16kHz is confirmed as the only configuration that delivers real audio from the ReSpeaker. 2-ch and 4-ch open without ALSA error but produce silence even with sound present — driver limitation. `LocalAudioTransport` with default `channels=1` is on the correct path. VAD sensitivity issues are not channel-packing symptoms. P-2 is cancelled (beam-forming requires working multi-channel capture, which is unavailable at 16kHz). See `memory/architecture_decisions.md` for full findings.
+**P-1 / P-2 fully closed.** 1-ch mono at 16kHz is confirmed correct. Channel provenance: ADC1 (channel 0) only — one physical mic, no mixing. PGA gain not in the 1-ch signal path; no software quality lever available. STT quality confirmed good via Deepgram. No further audio quality investigation warranted. See `memory/architecture_decisions.md` for full findings.
 
 ### EU-3 continuation
 

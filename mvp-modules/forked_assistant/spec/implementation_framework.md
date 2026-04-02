@@ -220,7 +220,13 @@ Status column: **not started** / in progress / complete.
 | P-1 | `test/smoke_respeaker_channels.py` | Determine actual channel count delivered by PyAudio for device index 1. The ring buffer and all inference code assume 16 kHz int16 mono. If the ReSpeaker presents as multi-channel, all downstream processing is silently wrong. | complete — executed 2026-04-02 |
 | P-2 | `test/smoke_beamform_shim.py` | If P-1 shows multi-channel data: prove that a channel-extraction shim (or USB tuning module beam-forming) produces clean mono that OWW and Silero respond to correctly. Answers: "do Track 2 results hold with correct channel handling?" | **not pursued** — 1-ch mono is sufficient for OWW, VAD, and STT; multi-channel not warranted |
 
-**P-1 result (2026-04-02):** 1-ch at 16kHz delivers real audio and is the correct path for all three pipeline stages (OWW, VAD, STT). 2-ch/4-ch silence in the probe was a format mismatch (P-1 used paInt16; AC108 natively outputs S32_LE); 4-ch capture is technically available via S32_LE + `ac108` ALSA device but is not pursued — adding channels risks buffer overruns for marginal STT gain. VAD sensitivity is not a channel-packing symptom. See `memory/architecture_decisions.md` for full findings and design rationale.
+**P-1 / P-2 fully closed (2026-04-02).** See `memory/architecture_decisions.md` — "ReSpeaker Audio Configuration" for complete findings. Summary:
+
+- 1-ch at 16kHz is confirmed correct for OWW, VAD, and STT. Deepgram STT confirmed good quality.
+- 2-ch/4-ch silence was a format mismatch (paInt16 vs AC108 native S32_LE); 4-ch is technically accessible but not pursued.
+- Channel provenance: ADC1 (channel 0) only — ALSA plug default, no ttable, one physical mic dominant (~90% certainty from tap probe).
+- PGA gain is not in the 1-ch signal path. PGA changes at 0/10/20/28 dB produced no change in noise floor (~56 RMS constant). ADC digital volume at 47.25 dB is the fixed active gain stage. No software quality lever available.
+- No further audio quality investigation warranted. EU-3 continuation is unblocked.
 
 **What P-1 should do:**
 - Open PyAudio, print full device info for index 1 (max input channels, default sample rate)
