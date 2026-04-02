@@ -68,6 +68,18 @@ Diagnostic prints in these handlers are essential — silent VAD failure is indi
 
 Any instance attribute referenced by an event handler must be initialized in `__init__` **before** handler registration. An `AttributeError` in an async handler raises but doesn't propagate visibly — the handler silently dies and the component appears to work but never responds to events.
 
+## InputAudioRawFrame Is a SystemFrame
+
+`InputAudioRawFrame` inherits from both `SystemFrame` and `AudioRawFrame`. This has a critical routing implication: each `FrameProcessor` has two internal tasks — `__input_frame_task_handler` (system frames) and `__process_frame_task_handler` (data frames). System frames are processed **inline in the input task** via `await self.__process_frame(...)` — they do NOT pass through `__process_queue`.
+
+This means when a processor's `process_frame` calls a synchronous blocking function (e.g., ONNX `model.predict()`), the entire event loop is blocked. No other processor task can run. The block duration is the full wall-clock time of the synchronous call.
+
+**Implication for instrumentation:** A bookend entry/exit probe pair correctly captures the full blocking cost of all intermediate processors, because the event loop is single-threaded and system frames are processed serially.
+
+**Implication for performance:** Any synchronous blocking work in a processor's `process_frame` (ONNX inference, heavy numpy, file I/O) blocks the entire pipeline for that duration. `asyncio.to_thread()` can move such work off the event loop if the underlying C extension releases the GIL.
+
+**Source:** Confirmed via pipecat 0.0.108 source inspection (`processors/frame_processor.py`, `transports/base_input.py`, `frames/frames.py`), 2026-04-02.
+
 ## Pipecat API Version Note
 
 These learnings apply to `pipecat-ai` 0.0.108. The framework's internal API patterns (especially around `process_frame` propagation) may change in future versions.

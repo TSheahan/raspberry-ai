@@ -141,10 +141,22 @@ See `stub_contracts.md` — Track 2 Spec for `RecorderStateStub` implementation 
 - Silero LSTM reset fires on →CAPTURE transition
 - Stream ops (start/stop PyAudio) sequence correctly without deadlock
 - Ctrl+C exits cleanly from any state
+- Duty cycle within budget (async predict eliminates event loop blocking)
 
 **Requires Pi + ReSpeaker.** This track exercises real hardware.
 
-**Estimated scope:** ~200 lines (processor adaptations + stub + harness). One or two Pi sessions.
+**EU-3c extended scope — async OWW predict (2026-04-02):**
+
+Duty cycle measurement revealed OWW `model.predict()` blocks the event loop for 23.7ms mean (119% of 20ms frame budget) on every 4th frame. Since predict produces a side-channel signal (not a frame transformation), frames can be pushed downstream immediately and predict runs via `asyncio.to_thread()`. This requires:
+
+1. Reorder `OpenWakeWordProcessor.process_frame`: push_frame before predict
+2. Wrap predict in `asyncio.to_thread()` (ONNX releases GIL)
+3. Add drain guard in `RecorderState.set_phase()`: await pending predict on wake_listen→capture transition (prevents concurrent ONNX — the proven step 7 failure mode)
+4. Re-run duty cycle to confirm uniform frame traversal
+
+**Instrumentation puzzle (tracked, deferred):** The bookend duty cycle histogram shows exactly 2× the predict call count as >20ms frames (223 vs 112 in one run). The mechanism is likely an asyncio task scheduling artifact affecting queue dwell measurement. Not blocking — further analysis deferred until the async predict optimization is in place and instrumentation can distinguish pipeline traversal from OWW compute. See `memory/architecture_decisions.md` for full characterization data.
+
+**Estimated scope:** ~200 lines (processor adaptations + stub + harness) + ~30 lines (async predict + drain guard). Two to three Pi sessions.
 
 ---
 

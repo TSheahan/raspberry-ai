@@ -110,6 +110,40 @@ No viable software audio quality lever exists within the current driver and ALSA
 
 Deepgram batch-mode STT on captures from this pipeline returns good transcripts. Audio quality is not the current bottleneck. The mono path at 16kHz, as configured by the seeed-voicecard installer, is adequate for the intended use case.
 
+## OWW Duty Cycle Characterization (2026-04-02)
+
+**Status: measured. Async predict optimization decided, not yet implemented.**
+
+Duty cycle instrumentation (bookend processors at pipeline head/tail) measured end-to-end per-frame pipeline traversal time during a live wake→capture→VAD cycle on Pi 4.
+
+**Confirmed audio format:** 16kHz, 1-ch, 320 samples (640 bytes) per frame, 20ms cadence. Matches all assumptions.
+
+**OWW predict is the dominant cost.** Measured on Pi 4 Cortex-A72, core 0:
+
+| Metric | Value |
+|--------|-------|
+| Predict call frequency | 1 per 4 audio frames (1280-sample chunk) |
+| Mean predict duration | 23.7ms (119% of 20ms frame budget) |
+| p95 predict duration | 28.1ms |
+| Max predict duration | 38.2ms |
+| Wake_listen budget utilization | 66% (average across all frames) |
+
+The processing pattern is **bimodal**: 50% of wake_listen frames measure 0–5ms (accumulate-only), 50% measure >20ms (predict-triggering or affected). The pipeline survives because 3 of 4 frames are fast (~1ms), keeping the running average under budget. But each predict call blocks the event loop for 24–38ms — no state transitions, ring writes, or command processing during that window.
+
+Capture phase is clean: 7% utilization, all frames <5ms (Silero inference is much lighter than OWW).
+
+**Instrumentation puzzle (tracked, not blocking):** The duty cycle histogram shows exactly 2× the predict call count as >20ms frames (223 >20ms vs 112 predict calls). The mechanism by which each predict causes 2 frames to measure >20ms in the bookend is likely an asyncio task scheduling artifact related to queue dwell time. This is tracked but deferred — further analysis is not warranted until the pipeline has broken-out OWW predict timing and the async optimization is in place. The operational characterization is unaffected: predict is the sole heavy operation.
+
+**Decision: move OWW predict to async (`asyncio.to_thread`)**
+
+OWW's `model.predict()` produces a side-channel signal (`signal_wake_detected`), not a frame transformation. There is no data dependency between predict's result and the audio frame flowing downstream. Frames can be pushed immediately; predict runs in background.
+
+ONNX runtime is a C++ extension that releases the GIL during inference. `to_thread` moves predict to a thread pool, freeing the event loop to process frames at steady 20ms cadence while ONNX compute runs concurrently.
+
+Cost: one frame of wake detection latency (~20ms). Imperceptible given OWW already accumulates 80ms of audio per chunk, and the master's command polling adds ~100ms on top.
+
+**Constraint: drain guard on phase transition.** When transitioning wake_listen→capture, any pending async predict must complete before Silero starts. This prevents concurrent ONNX sessions (the proven failure mode from step 7). Implemented as an asyncio.Event or similar in `RecorderState.set_phase()`.
+
 ## Why Recorder Is Capture-Only
 
 The recorder child owns the microphone and nothing else. Playback (TTS) belongs to the master or a future separate process. This keeps the child simple and aligned with the ReSpeaker hat's input-focused design. It also avoids bidirectional audio I/O races in the same process.

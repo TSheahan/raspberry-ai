@@ -74,6 +74,16 @@ Two hardware-probe scripts are tracked in `spec/implementation_framework.md` und
 
 **P-1 / P-2 fully closed.** 1-ch mono at 16kHz is confirmed correct. Channel provenance: ADC1 (channel 0) only — one physical mic, no mixing. PGA gain not in the 1-ch signal path; no software quality lever available. STT quality confirmed good via Deepgram. No further audio quality investigation warranted. See `memory/architecture_decisions.md` for full findings.
 
-### EU-3 continuation
+### EU-3c continuation — async OWW predict
 
-Track 2 pipeline harness (`test/track2_pipeline_harness.py`) is the working version. It exercises the real per-frame memcpy cost via `InProcessRingBuffer` (write-path simulation only, no reader). Next EU increment: duty cycle instrumentation — measure end-to-end per-frame pipeline processing time against the 20ms budget. This is deferred until P-1/P-2 are resolved so that measurements reflect correct audio input.
+Track 2 pipeline harness (`test/track2_pipeline_harness.py`) is the working version with duty cycle instrumentation complete. Bookend entry/exit processors measure end-to-end per-frame pipeline traversal, with OWW predict timing, per-phase arrival cadence, and frame metadata logging.
+
+**Duty cycle findings (2026-04-02):** OWW `model.predict()` takes 23.7ms mean on Pi 4 (119% of 20ms budget). It fires every 4th frame (1280-sample chunk at 320 samples/frame). Capture phase is clean at 7% utilization. See `memory/architecture_decisions.md` — "OWW Duty Cycle Characterization" for full data.
+
+**Next step:** Move OWW predict to async via `asyncio.to_thread()`. This is an EU-3c scope extension, not a new EU. Changes:
+1. Reorder `OpenWakeWordProcessor.process_frame` — push_frame before predict
+2. Wrap predict in `to_thread` (ONNX releases GIL)
+3. Add drain guard in `RecorderState.set_phase()` for wake_listen→capture (prevent concurrent ONNX)
+4. Re-run duty cycle to confirm uniform frame traversal
+
+See `spec/implementation_framework.md` — EU-3c for full scope and the instrumentation puzzle note.

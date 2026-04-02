@@ -14,14 +14,15 @@ consumption is not under test here — no reader is attached.
 
 Duty cycle instrumentation (optional, ENABLE_DUTY_CYCLE=1):
   Bookend processors (DutyCycleEntry at head, DutyCycleExit at tail) measure
-  end-to-end pipeline traversal time per audio frame.  Pipecat's default
-  FrameProcessor uses per-processor asyncio queues, so push_frame() is just
-  a queue-put — a single wrap-push_frame probe only sees ~0.1ms.  The bookend
-  approach works because all processor tasks share one event loop thread: the
-  exit processor runs only after all intermediate blocking work (ONNX inference,
-  ring write) completes.  Entry also tracks inter-frame arrival jitter and
-  transport audio queue depth.  Stats every DUTY_CYCLE_WINDOW frames with
-  start/end phase labels; per-phase histogram at exit.
+  end-to-end pipeline traversal time per audio frame.  InputAudioRawFrame is
+  a SystemFrame, so each processor's __input_frame_task_handler processes it
+  inline (not via __process_queue).  When OWW predict() blocks the event loop,
+  no other processor tasks can run — the bookend elapsed time captures the
+  true pipeline duty cycle including all blocking work.  Entry also tracks
+  inter-frame arrival cadence (stddev), transport queue depth, and logs frame
+  metadata (sample_rate, size) on first audio frame.  OWW predict() calls are
+  individually timed.  Stats every DUTY_CYCLE_WINDOW frames with start/end
+  phase labels; per-phase histogram + arrival cadence + predict summary at exit.
 
 Usage (on Pi with ReSpeaker):
     cd ~/raspberry-ai/mvp-modules/forked_assistant
@@ -106,22 +107,20 @@ class InProcessRingBuffer:
 # Duty cycle instrumentation — bookend entry/exit processors + collector
 # ---------------------------------------------------------------------------
 #
-# Pipecat's default FrameProcessor uses per-processor asyncio queues:
-# push_frame() enqueues into the next processor's input queue and returns
-# immediately (~0.1ms). Actual processing happens on a separate asyncio
-# task per processor. Therefore a single wrap-push_frame probe only
-# measures queue-put time, not processing time.
+# InputAudioRawFrame inherits from SystemFrame.  Each FrameProcessor has
+# two internal tasks: __input_frame_task_handler (system frames) and
+# __process_frame_task_handler (data frames).  System frames are awaited
+# inline in the input task — they do NOT pass through __process_queue.
+# This means model.predict() blocks the single event loop thread directly.
 #
-# The bookend approach works because all processor tasks share one event
-# loop thread. The exit processor's task can only run after all
-# intermediate processors have finished their blocking work for that
-# frame (ONNX inference, ring write, etc.). The elapsed time from entry
-# stamp to exit collection captures: sum of (queue dwell + processing)
-# across all intermediate processors — the true pipeline duty cycle.
+# The bookend approach works because: when OWW's input task awaits
+# predict(), no other processor's task can run.  The elapsed time from
+# DutyCycleEntry stamp to DutyCycleExit collection therefore captures
+# the full blocking cost of all intermediate processors.
 #
-# Audio frames maintain FIFO ordering through the pipeline (all go
-# through the same per-processor process queue, no priority reordering),
-# so a shared deque of entry timestamps pairs correctly with exit reads.
+# FIFO ordering is maintained because each processor's input task
+# processes one frame at a time (await get → await process → loop).
+# The shared deque of entry timestamps pairs correctly with exit reads.
 # ---------------------------------------------------------------------------
 
 DUTY_CYCLE_WINDOW  = 100   # frames per periodic report (100 frames ≈ 2 s)
@@ -152,6 +151,7 @@ class DutyCycleCollector:
 
         # --- per-phase accumulators (final summary) ---
         self._phase_samples: dict[str, list[float]] = defaultdict(list)
+        self._phase_arrivals: dict[str, list[float]] = defaultdict(list)
 
         # --- inter-frame tracking ---
         self._last_arrival: float = 0.0
@@ -164,7 +164,9 @@ class DutyCycleCollector:
         self._entry_stamps.append(now)
 
         if self._last_arrival > 0:
-            self._window_arrivals.append((now - self._last_arrival) * 1000.0)
+            gap_ms = (now - self._last_arrival) * 1000.0
+            self._window_arrivals.append(gap_ms)
+            self._phase_arrivals[self._state.phase].append(gap_ms)
         self._last_arrival = now
 
         qd = self._queue_depth()
@@ -227,10 +229,10 @@ class DutyCycleCollector:
 
         arrival_str = ""
         if self._window_arrivals:
-            sa = sorted(self._window_arrivals)
-            a_mean = sum(sa) / len(sa)
-            a_jitter = sa[-1] - sa[0]
-            arrival_str = f"  arrival: mean={a_mean:.1f}ms jitter={a_jitter:.1f}ms"
+            a_mean = sum(self._window_arrivals) / len(self._window_arrivals)
+            a_var = sum((x - a_mean) ** 2 for x in self._window_arrivals) / len(self._window_arrivals)
+            a_std = a_var ** 0.5
+            arrival_str = f"  arrival: mean={a_mean:.1f}ms σ={a_std:.1f}ms"
 
         qdepth_str = ""
         if self._window_max_qdepth >= 0:
@@ -292,6 +294,21 @@ class DutyCycleCollector:
         total = sum(len(s) for s in self._phase_samples.values())
         print(f"\n  Frames over {FRAME_DURATION_MS:.0f}ms budget: "
               f"{over}/{total}" + (f" ({over/total*100:.1f}%)" if total else ""))
+
+        if self._phase_arrivals:
+            print(f"\n  Arrival cadence (inter-frame intervals):")
+            for phase in ("wake_listen", "capture", "dormant"):
+                arrivals = self._phase_arrivals.get(phase)
+                if not arrivals:
+                    continue
+                sa = sorted(arrivals)
+                n = len(sa)
+                a_mean = sum(sa) / n
+                a_var = sum((x - a_mean) ** 2 for x in sa) / n
+                a_std = a_var ** 0.5
+                print(f"    {phase} ({n}): mean={a_mean:.1f}ms σ={a_std:.1f}ms "
+                      f"min={sa[0]:.1f}ms max={sa[-1]:.1f}ms")
+
         print("=" * 64)
 
 
@@ -301,12 +318,25 @@ class DutyCycleEntry(FrameProcessor):
     def __init__(self, collector: DutyCycleCollector):
         super().__init__()
         self._collector = collector
+        self._first_frame_logged = False
 
     async def process_frame(self, frame: Frame, direction: FrameDirection):
         await super().process_frame(frame, direction)
         if isinstance(frame, (AudioRawFrame, InputAudioRawFrame)):
+            if not self._first_frame_logged:
+                self._log_first_frame(frame)
+                self._first_frame_logged = True
             self._collector.stamp_entry()
         await self.push_frame(frame, direction)
+
+    def _log_first_frame(self, frame):
+        audio_bytes = len(frame.audio)
+        samples = audio_bytes // 2
+        sr = getattr(frame, 'sample_rate', '?')
+        ch = getattr(frame, 'num_channels', '?')
+        dur = f"{samples / sr * 1000:.1f}ms" if isinstance(sr, (int, float)) and sr > 0 else "?"
+        print(f"  [DUTY] First audio frame: {audio_bytes} bytes, "
+              f"{samples} samples, sr={sr} Hz, ch={ch}, duration={dur}")
 
 
 class DutyCycleExit(FrameProcessor):
@@ -440,6 +470,8 @@ class OpenWakeWordProcessor(FrameProcessor):
         self._chunks = []
         self.last_detection_time = 0.0
         self.DEBOUNCE_SECONDS = 1.8
+        self._predict_times: list[float] = []
+        self._frames_in_wake: int = 0
         print("openwakeword ready")
 
     async def process_frame(self, frame: Frame, direction):
@@ -451,6 +483,7 @@ class OpenWakeWordProcessor(FrameProcessor):
                 await self.push_frame(frame, direction)
                 return
 
+            self._frames_in_wake += 1
             audio_chunk = np.frombuffer(frame.audio, dtype=np.int16)
             self._chunks.append(audio_chunk)
             buffer = np.concatenate(self._chunks)
@@ -459,7 +492,9 @@ class OpenWakeWordProcessor(FrameProcessor):
             while len(buffer) - consumed >= chunk_size:
                 chunk = buffer[consumed:consumed + chunk_size]
                 consumed += chunk_size
+                t_pred = time.perf_counter()
                 predictions = self.model.predict(chunk.astype(np.float32))
+                self._predict_times.append((time.perf_counter() - t_pred) * 1000.0)
                 current_time = time.time()
                 for wakeword, score in predictions.items():
                     if (wakeword == "hey_jarvis"
@@ -472,6 +507,23 @@ class OpenWakeWordProcessor(FrameProcessor):
             self._chunks = [remainder] if len(remainder) > 0 else []
 
         await self.push_frame(frame, direction)
+
+    def predict_summary(self) -> str:
+        if not self._predict_times:
+            return "  No OWW predict calls recorded."
+        s = sorted(self._predict_times)
+        n = len(s)
+        mean = sum(s) / n
+        p95 = DutyCycleCollector._percentile(s, 0.95)
+        p99 = DutyCycleCollector._percentile(s, 0.99)
+        mx = s[-1]
+        ratio = self._frames_in_wake / n if n > 0 else 0
+        lines = [
+            f"  OWW predict: {n} calls in {self._frames_in_wake} wake frames "
+            f"(1 per {ratio:.1f} frames)",
+            f"    mean={mean:.1f}ms  p95={p95:.1f}ms  p99={p99:.1f}ms  max={mx:.1f}ms",
+        ]
+        return "\n".join(lines)
 
 
 # ---------------------------------------------------------------------------
@@ -627,6 +679,8 @@ async def main():
         driver.cancel()
         if duty_collector:
             duty_collector.print_final_summary()
+            print()
+            print(wake_processor.predict_summary())
         for sig in (signal.SIGINT, signal.SIGTERM):
             loop.remove_signal_handler(sig)
         print("\nEU-3c harness finished.")
