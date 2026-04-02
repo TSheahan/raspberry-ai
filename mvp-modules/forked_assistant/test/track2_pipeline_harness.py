@@ -12,12 +12,16 @@ to the real SharedMemory ring (512 KB, wrap-around bytearray copy) so that
 write_audio() imposes the same per-frame memcpy cost as production. Data
 consumption is not under test here — no reader is attached.
 
-DutyCycleProbe (optional, composed into pipeline when ENABLE_DUTY_CYCLE=1):
-  Measures end-to-end pipeline processing time per audio frame by exploiting
-  pipecat's direct-mode synchronous push_frame chain. Also tracks inter-frame
-  arrival jitter and transport audio queue depth. Stats are printed every
-  DUTY_CYCLE_WINDOW frames with start/end phase labels, and a per-phase
-  histogram is printed at harness exit.
+Duty cycle instrumentation (optional, ENABLE_DUTY_CYCLE=1):
+  Bookend processors (DutyCycleEntry at head, DutyCycleExit at tail) measure
+  end-to-end pipeline traversal time per audio frame.  Pipecat's default
+  FrameProcessor uses per-processor asyncio queues, so push_frame() is just
+  a queue-put — a single wrap-push_frame probe only sees ~0.1ms.  The bookend
+  approach works because all processor tasks share one event loop thread: the
+  exit processor runs only after all intermediate blocking work (ONNX inference,
+  ring write) completes.  Entry also tracks inter-frame arrival jitter and
+  transport audio queue depth.  Stats every DUTY_CYCLE_WINDOW frames with
+  start/end phase labels; per-phase histogram at exit.
 
 Usage (on Pi with ReSpeaker):
     cd ~/raspberry-ai/mvp-modules/forked_assistant
@@ -34,7 +38,7 @@ import signal
 import time
 import math
 import numpy as np
-from collections import defaultdict
+from collections import defaultdict, deque
 from functools import partial
 
 from openwakeword.model import Model as OWWModel
@@ -99,7 +103,25 @@ class InProcessRingBuffer:
 
 
 # ---------------------------------------------------------------------------
-# DutyCycleProbe — end-to-end pipeline timing (Methods A+B+C)
+# Duty cycle instrumentation — bookend entry/exit processors + collector
+# ---------------------------------------------------------------------------
+#
+# Pipecat's default FrameProcessor uses per-processor asyncio queues:
+# push_frame() enqueues into the next processor's input queue and returns
+# immediately (~0.1ms). Actual processing happens on a separate asyncio
+# task per processor. Therefore a single wrap-push_frame probe only
+# measures queue-put time, not processing time.
+#
+# The bookend approach works because all processor tasks share one event
+# loop thread. The exit processor's task can only run after all
+# intermediate processors have finished their blocking work for that
+# frame (ONNX inference, ring write, etc.). The elapsed time from entry
+# stamp to exit collection captures: sum of (queue dwell + processing)
+# across all intermediate processors — the true pipeline duty cycle.
+#
+# Audio frames maintain FIFO ordering through the pipeline (all go
+# through the same per-processor process queue, no priority reordering),
+# so a shared deque of entry timestamps pairs correctly with exit reads.
 # ---------------------------------------------------------------------------
 
 DUTY_CYCLE_WINDOW  = 100   # frames per periodic report (100 frames ≈ 2 s)
@@ -108,22 +130,19 @@ FRAME_DURATION_MS  = 20.0  # PyAudio cadence — the budget
 HISTOGRAM_EDGES_MS = (0, 5, 10, 15, 20)  # bucket boundaries for final summary
 
 
-class DutyCycleProbe(FrameProcessor):
-    """Head-of-chain probe measuring total downstream processing time.
+class DutyCycleCollector:
+    """Aggregates entry/exit timestamps and computes duty cycle statistics.
 
-    Placed between the input transport and the first real processor.  In
-    pipecat's direct mode, push_frame() blocks until the entire downstream
-    chain returns, so timing that single call gives the true per-frame
-    pipeline duty cycle.
-
-    Also records inter-frame arrival interval (jitter) and samples the
-    transport's _audio_in_queue depth each frame.
+    Not a FrameProcessor — a plain object shared by DutyCycleEntry and
+    DutyCycleExit. Holds the entry timestamp deque, rolling window, and
+    per-phase accumulators.
     """
 
     def __init__(self, state: RecorderState, transport_input=None):
-        super().__init__()
         self._state = state
         self._transport_input = transport_input
+
+        self._entry_stamps: deque[float] = deque()
 
         # --- rolling window (periodic report) ---
         self._window: list[float] = []
@@ -137,6 +156,39 @@ class DutyCycleProbe(FrameProcessor):
         # --- inter-frame tracking ---
         self._last_arrival: float = 0.0
         self._total_frames: int = 0
+
+    # -- called by DutyCycleEntry on each audio frame -------------------
+
+    def stamp_entry(self) -> None:
+        now = time.perf_counter()
+        self._entry_stamps.append(now)
+
+        if self._last_arrival > 0:
+            self._window_arrivals.append((now - self._last_arrival) * 1000.0)
+        self._last_arrival = now
+
+        qd = self._queue_depth()
+        if qd > self._window_max_qdepth:
+            self._window_max_qdepth = qd
+
+    # -- called by DutyCycleExit on each audio frame --------------------
+
+    def stamp_exit(self) -> None:
+        if not self._entry_stamps:
+            return
+        t0 = self._entry_stamps.popleft()
+        elapsed_ms = (time.perf_counter() - t0) * 1000.0
+
+        self._total_frames += 1
+
+        if not self._window:
+            self._window_start_phase = self._state.phase
+
+        self._window.append(elapsed_ms)
+        self._phase_samples[self._state.phase].append(elapsed_ms)
+
+        if len(self._window) >= DUTY_CYCLE_WINDOW:
+            self._emit_periodic()
 
     # -- helpers --------------------------------------------------------
 
@@ -213,9 +265,8 @@ class DutyCycleProbe(FrameProcessor):
             print(f"\n  {phase}  ({n} frames, budget util {util:.0f}%)")
             print(f"    mean={mean:.1f}ms  p95={p95:.1f}ms  p99={p99:.1f}ms  max={mx:.1f}ms")
 
-            # histogram
             edges = HISTOGRAM_EDGES_MS
-            buckets = [0] * (len(edges))  # last bucket is > final edge
+            buckets = [0] * (len(edges))
             for v in s:
                 placed = False
                 for i in range(len(edges) - 1):
@@ -243,43 +294,33 @@ class DutyCycleProbe(FrameProcessor):
               f"{over}/{total}" + (f" ({over/total*100:.1f}%)" if total else ""))
         print("=" * 64)
 
-    # -- FrameProcessor interface ---------------------------------------
+
+class DutyCycleEntry(FrameProcessor):
+    """Pipeline head bookend: stamps each audio frame's arrival time."""
+
+    def __init__(self, collector: DutyCycleCollector):
+        super().__init__()
+        self._collector = collector
 
     async def process_frame(self, frame: Frame, direction: FrameDirection):
         await super().process_frame(frame, direction)
-
-        if not isinstance(frame, (AudioRawFrame, InputAudioRawFrame)):
-            await self.push_frame(frame, direction)
-            return
-
-        now = time.perf_counter()
-
-        # inter-frame arrival
-        if self._last_arrival > 0:
-            interval_ms = (now - self._last_arrival) * 1000.0
-            self._window_arrivals.append(interval_ms)
-        self._last_arrival = now
-
-        # queue depth sample
-        qd = self._queue_depth()
-        if qd > self._window_max_qdepth:
-            self._window_max_qdepth = qd
-
-        # start window phase tracking on first frame of window
-        if not self._window:
-            self._window_start_phase = self._state.phase
-
-        # --- the measurement: time the entire downstream chain ---
-        t0 = time.perf_counter()
+        if isinstance(frame, (AudioRawFrame, InputAudioRawFrame)):
+            self._collector.stamp_entry()
         await self.push_frame(frame, direction)
-        elapsed_ms = (time.perf_counter() - t0) * 1000.0
 
-        self._total_frames += 1
-        self._window.append(elapsed_ms)
-        self._phase_samples[self._state.phase].append(elapsed_ms)
 
-        if len(self._window) >= DUTY_CYCLE_WINDOW:
-            self._emit_periodic()
+class DutyCycleExit(FrameProcessor):
+    """Pipeline tail bookend: completes the timing measurement."""
+
+    def __init__(self, collector: DutyCycleCollector):
+        super().__init__()
+        self._collector = collector
+
+    async def process_frame(self, frame: Frame, direction: FrameDirection):
+        await super().process_frame(frame, direction)
+        if isinstance(frame, (AudioRawFrame, InputAudioRawFrame)):
+            self._collector.stamp_exit()
+        await self.push_frame(frame, direction)
 
 
 # ---------------------------------------------------------------------------
@@ -459,8 +500,7 @@ class RingBufferWriter(FrameProcessor):
 # Command driver — simulates master commands via direct state.set_phase()
 # ---------------------------------------------------------------------------
 
-async def direct_command_driver(state: RecorderStateStub,
-                                duty_probe: DutyCycleProbe | None = None):
+async def direct_command_driver(state: RecorderStateStub):
     """Drive state transitions without a pipe — simulates master commands."""
     await asyncio.sleep(1.0)
     print("[HARNESS] Setting phase to wake_listen")
@@ -521,9 +561,11 @@ async def main():
 
     input_transport = transport.input()
 
-    duty_probe = None
+    duty_collector = None
     if ENABLE_DUTY_CYCLE:
-        duty_probe = DutyCycleProbe(state=state, transport_input=input_transport)
+        duty_collector = DutyCycleCollector(state=state, transport_input=input_transport)
+        duty_entry = DutyCycleEntry(duty_collector)
+        duty_exit  = DutyCycleExit(duty_collector)
 
     # Wire state refs
     state.set_transport(input_transport)
@@ -531,11 +573,13 @@ async def main():
     state.set_oww(wake_processor)
     state.set_ring_writer(ring_writer)
 
-    # Compose pipeline — duty cycle probe is inserted only when enabled
+    # Compose pipeline — bookend probes wrap the real processors when enabled
     processors = [input_transport]
-    if duty_probe:
-        processors.append(duty_probe)
+    if duty_collector:
+        processors.append(duty_entry)
     processors.extend([vad_processor, wake_processor, ring_writer])
+    if duty_collector:
+        processors.append(duty_exit)
 
     pipeline = Pipeline(processors)
     runner = PipelineRunner()
@@ -556,7 +600,7 @@ async def main():
     print("EU-3c Track 2 -- Pipecat pipeline harness (single process)")
     print("  Say 'hey Jarvis', speak, then pause.")
     print("  3 wake->capture->VAD cycles, then exit.")
-    if duty_probe:
+    if duty_collector:
         print(f"  Duty cycle probe ENABLED  (window={DUTY_CYCLE_WINDOW} frames, "
               f"budget={FRAME_DURATION_MS:.0f}ms)")
     print("  Press Ctrl+C to exit early.\n")
@@ -573,7 +617,7 @@ async def main():
     for sig in (signal.SIGINT, signal.SIGTERM):
         loop.add_signal_handler(sig, partial(signal_handler, sig.name))
 
-    driver = asyncio.create_task(direct_command_driver(state, duty_probe))
+    driver = asyncio.create_task(direct_command_driver(state))
 
     try:
         await runner.run(task)
@@ -581,8 +625,8 @@ async def main():
         print("\nPipeline cancelled.")
     finally:
         driver.cancel()
-        if duty_probe:
-            duty_probe.print_final_summary()
+        if duty_collector:
+            duty_collector.print_final_summary()
         for sig in (signal.SIGINT, signal.SIGTERM):
             loop.remove_signal_handler(sig)
         print("\nEU-3c harness finished.")
