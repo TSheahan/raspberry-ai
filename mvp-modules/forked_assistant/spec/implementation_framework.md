@@ -209,6 +209,34 @@ See `stub_contracts.md` — Track 2 Spec for `RecorderStateStub` implementation 
 
 ---
 
+## Prerequisite Smoke Tests (not in EU integration path)
+
+These tests are not effort units in the recorder-child build sequence, but they are **prerequisites before EU-3c results can be trusted** for accuracy-sensitive work (duty cycle measurement, VAD sensitivity tuning, beam-forming). Each is a standalone script in `test/`.
+
+Status column: **not started** / in progress / complete.
+
+| ID | Deliverable | Goal | Status |
+|----|-------------|------|--------|
+| P-1 | `test/smoke_respeaker_channels.py` | Determine actual channel count delivered by PyAudio for device index 1. The ring buffer and all inference code assume 16 kHz int16 mono. If the ReSpeaker presents as multi-channel, all downstream processing is silently wrong. | complete |
+| P-2 | `test/smoke_beamform_shim.py` | If P-1 shows multi-channel data: prove that a channel-extraction shim (or USB tuning module beam-forming) produces clean mono that OWW and Silero respond to correctly. Answers: "do Track 2 results hold with correct channel handling?" | not started |
+
+**Open question — VAD sensitivity:** There is a suspected wrong-microphone / wrong-channel symptom where Silero VAD fires inconsistently. This may be a downstream effect of the channel-packing issue (P-1/P-2) rather than a Silero tuning problem. Investigate P-1 before chasing VAD parameter changes.
+
+**What P-1 should do:**
+- Open PyAudio, print full device info for index 1 (max input channels, default sample rate)
+- Attempt to open a raw input stream at 1-ch, 2-ch, and 4-ch; print success/failure and captured frame sizes
+- Print the first 8 int16 samples from each successful configuration so interleaving is visible
+- No inference — this is a hardware probe only
+
+**What P-2 should do (depends on P-1):**
+- Capture N seconds of multi-channel audio from the ReSpeaker
+- Apply channel extraction (take channel 0) and optionally USB tuning beam-forming if the `tuning` module is available
+- Feed the resulting mono stream to OWW in real-time; report detection events and scores
+- Compare to a baseline mono-only capture at the same time to confirm equivalence
+- If results differ significantly, document the delta as a constraint for EU-3c
+
+---
+
 ## Dependency Graph
 
 ```

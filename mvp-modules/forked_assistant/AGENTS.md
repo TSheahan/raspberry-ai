@@ -63,4 +63,17 @@ Test files add `sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..',
 
 ## What's Next
 
-Track 2 pipeline harness (`test/track2_pipeline_harness.py`) is the working version. It exercises the real per-frame memcpy cost via `InProcessRingBuffer` (write-path simulation only, no reader). Next increment: duty cycle instrumentation — measure end-to-end per-frame pipeline processing time against the 20ms budget. This is deferred to keep concerns separated from the ring write simulation.
+### Prerequisite smoke tests (not in EU path — must complete before trusting EU-3c accuracy metrics)
+
+Two hardware-probe scripts are tracked in `spec/implementation_framework.md` under "Prerequisite Smoke Tests":
+
+| ID | File | Status |
+|----|------|--------|
+| P-1 | `test/smoke_respeaker_channels.py` | complete |
+| P-2 | `test/smoke_beamform_shim.py` | not started |
+
+**Why these are blockers for accuracy work:** `LocalAudioTransport` is constructed without an explicit `channels=` parameter. The ReSpeaker may present as multi-channel to PyAudio, silently corrupting OWW and Silero input. There is a suspected VAD sensitivity issue that may be a symptom of this. P-1 must be run before duty cycle or VAD tuning results can be trusted. See `memory/architecture_decisions.md` — "Open Assumption: Mono Audio from ReSpeaker".
+
+### EU-3 continuation
+
+Track 2 pipeline harness (`test/track2_pipeline_harness.py`) is the working version. It exercises the real per-frame memcpy cost via `InProcessRingBuffer` (write-path simulation only, no reader). Next EU increment: duty cycle instrumentation — measure end-to-end per-frame pipeline processing time against the 20ms budget. This is deferred until P-1/P-2 are resolved so that measurements reflect correct audio input.
