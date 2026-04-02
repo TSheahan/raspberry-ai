@@ -22,7 +22,6 @@ import asyncio
 import math
 import os
 import signal
-import sys
 import time
 
 import numpy as np
@@ -68,12 +67,60 @@ FRAME_DURATION_MS  = 20.0
 HISTOGRAM_EDGES_MS = (0, 5, 10, 15, 20)
 
 
+class QueueDepthMonitor:
+    """Always-on tripwire for audio input queue backlog.
+
+    Reads transport_input._audio_in_queue.qsize() once per audio frame.
+    Prints an immediate alarm when depth exceeds ALARM_THRESHOLD.
+    Designed to be called from exactly one pipeline processor per frame
+    (DutyCycleEntry when ENABLE_DUTY_CYCLE=1, GatedVADProcessor otherwise).
+    """
+
+    ALARM_THRESHOLD = 2
+
+    def __init__(self, transport_input):
+        self._transport_input = transport_input
+        self._max_depth_seen: int = 0
+        self._alarm_count: int = 0
+        self._consecutive_alarms: int = 0
+
+    def check(self) -> int:
+        qd = self._read_depth()
+        if qd < 0:
+            return qd
+        if qd > self._max_depth_seen:
+            self._max_depth_seen = qd
+        if qd > self.ALARM_THRESHOLD:
+            self._alarm_count += 1
+            self._consecutive_alarms += 1
+            print(f"  [QDEPTH ALARM] depth={qd} "
+                  f"consecutive={self._consecutive_alarms} "
+                  f"total={self._alarm_count} max_seen={self._max_depth_seen}")
+        else:
+            self._consecutive_alarms = 0
+        return qd
+
+    @property
+    def max_depth_seen(self) -> int:
+        return self._max_depth_seen
+
+    def _read_depth(self) -> int:
+        t = self._transport_input
+        if t and hasattr(t, '_audio_in_queue'):
+            return t._audio_in_queue.qsize()
+        return -1
+
+
+# noinspection DuplicatedCode
 class DutyCycleCollector:
     """Aggregates entry/exit timestamps and computes duty cycle statistics."""
 
-    def __init__(self, state: RecorderState, transport_input=None):
+    def __init__(self, state: RecorderState, monitor: QueueDepthMonitor, transport_input=None):
         self._state = state
         self._transport_input = transport_input
+        if not isinstance(monitor, QueueDepthMonitor):
+            raise RuntimeError("expected monitor")
+        self._monitor = monitor
 
         self._entry_stamps: deque[float] = deque()
 
@@ -98,7 +145,7 @@ class DutyCycleCollector:
             self._phase_arrivals[self._state.phase].append(gap_ms)
         self._last_arrival = now
 
-        qd = self._queue_depth()
+        qd = self._monitor.check()
         if qd > self._window_max_qdepth:
             self._window_max_qdepth = qd
 
@@ -118,12 +165,6 @@ class DutyCycleCollector:
 
         if len(self._window) >= DUTY_CYCLE_WINDOW:
             self._emit_periodic()
-
-    def _queue_depth(self) -> int:
-        t = self._transport_input
-        if t and hasattr(t, '_audio_in_queue'):
-            return t._audio_in_queue.qsize()
-        return -1
 
     @staticmethod
     def _percentile(sorted_vals: list[float], p: float) -> float:
@@ -241,6 +282,7 @@ class DutyCycleCollector:
         print("=" * 64)
 
 
+# noinspection DuplicatedCode
 class DutyCycleEntry(FrameProcessor):
     """Pipeline head bookend: stamps each audio frame's arrival time."""
 
@@ -258,7 +300,8 @@ class DutyCycleEntry(FrameProcessor):
             self._collector.stamp_entry()
         await self.push_frame(frame, direction)
 
-    def _log_first_frame(self, frame):
+    @staticmethod
+    def _log_first_frame(frame):
         audio_bytes = len(frame.audio)
         samples = audio_bytes // 2
         sr = getattr(frame, 'sample_rate', '?')
@@ -335,9 +378,11 @@ class GatedVADProcessor(FrameProcessor):
     the VAD controller. CancelFrame/EndFrame never reach it (crash fix).
     """
 
-    def __init__(self, *, vad_analyzer, state: RecorderState, **kwargs):
+    def __init__(self, *, vad_analyzer, state: RecorderState,
+                 monitor: QueueDepthMonitor | None = None, **kwargs):
         super().__init__(**kwargs)
         self.state = state
+        self._monitor = monitor
         self._vad_analyzer = vad_analyzer
         self._vad_controller = VADController(vad_analyzer)
 
@@ -366,6 +411,8 @@ class GatedVADProcessor(FrameProcessor):
         if isinstance(frame, StartFrame):
             await self._vad_controller.process_frame(frame)
         elif isinstance(frame, (AudioRawFrame, InputAudioRawFrame)):
+            if self._monitor:
+                self._monitor.check()
             self.state.inc_total_frames()
             if self.state.capture:
                 self.state.inc_vad_frames()
@@ -376,6 +423,7 @@ class GatedVADProcessor(FrameProcessor):
 # OpenWakeWordProcessor — OWW inference gated to WAKE_LISTEN phase only
 # ---------------------------------------------------------------------------
 
+# noinspection DuplicatedCode
 class OpenWakeWordProcessor(FrameProcessor):
     """OWW processor that only runs inference during WAKE_LISTEN phase.
 
@@ -540,21 +588,26 @@ async def recorder_child_main(pipe, shm_name: str) -> None:
             )
         )
 
+        input_transport = transport.input()
+
+        qdepth_monitor = QueueDepthMonitor(transport_input=input_transport)
+
         vad_processor = GatedVADProcessor(
             vad_analyzer=SileroVADAnalyzer(
                 params=VADParams(stop_secs=1.8, start_secs=0.2),
             ),
             state=state,
+            monitor=qdepth_monitor if not ENABLE_DUTY_CYCLE else None,
         )
 
         wake_processor = OpenWakeWordProcessor(state=state)
         audio_writer = AudioFrameWriter(state=state)
 
-        input_transport = transport.input()
-
         duty_collector = None
         if ENABLE_DUTY_CYCLE:
-            duty_collector = DutyCycleCollector(state=state, transport_input=input_transport)
+            duty_collector = DutyCycleCollector(
+                state=state, monitor=qdepth_monitor, transport_input=input_transport,
+            )
 
         state.set_transport(input_transport)
         state.set_vad(vad_processor)
@@ -582,6 +635,8 @@ async def recorder_child_main(pipe, shm_name: str) -> None:
         task = PipelineTask(pipeline)
 
         pipe.send({"cmd": "READY"})
+        print(f"  [child] queue depth monitor ENABLED "
+              f"(alarm threshold={QueueDepthMonitor.ALARM_THRESHOLD})")
         if duty_collector:
             print(f"  [child] duty cycle probe ENABLED "
                   f"(window={DUTY_CYCLE_WINDOW} frames, budget={FRAME_DURATION_MS:.0f}ms)")
@@ -611,6 +666,8 @@ async def recorder_child_main(pipe, shm_name: str) -> None:
                 await listener
             except asyncio.CancelledError:
                 pass
+            print(f"  [QDEPTH] max_depth_seen={qdepth_monitor.max_depth_seen} "
+                  f"total_alarms={qdepth_monitor._alarm_count}")
             if duty_collector:
                 duty_collector.print_final_summary(wake_processor)
             for sig in (signal.SIGINT, signal.SIGTERM):
