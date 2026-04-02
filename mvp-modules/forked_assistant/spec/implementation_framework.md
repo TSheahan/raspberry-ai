@@ -209,6 +209,20 @@ Master is synchronous (no asyncio in the master process). The event loop blocks 
 
 STT uses `DeepgramClient.listen.rest.v("1").transcribe_file()` (file-based batch API). Claude uses `claude -p` subprocess, same as v10a.
 
+**First Pi run findings (2026-04-03):**
+
+1. **Audio driver buffer overrun.** Occurred during the run. Root cause not yet diagnosed — likely PyAudio buffer pressure during the cognitive loop or ring buffer write timing. Investigate before the next session.
+
+2. **Transcription did not succeed.** May be a consequence of the overrun (corrupted or empty audio bytes), or a Deepgram API call issue. Needs isolation — see debug strategy below.
+
+**Debug strategy for next session:**
+
+- Add a `--save-wav` flag (or env var `SAVE_CAPTURE_WAV=1`) to `master.py` that writes each captured ring buffer span to a timestamped `.wav` file in a scratch directory before sending to Deepgram. This lets you:
+  - Inspect captured audio independently of STT (play it back, check duration and content)
+  - Re-run transcription offline against the saved file to confirm the API call
+  - Confirm the ring buffer read is producing valid audio (not zeros, not truncated)
+- Implement as a thin wrapper in `cognitive_loop()` — one `wave.open()` write after `ring_reader.read()`, before `transcribe()` is called. Zero impact on normal operation when disabled.
+
 **Estimated scope:** ~120 lines. One session, assuming EU-3 is proven.
 
 ---
