@@ -1,0 +1,21 @@
+# Reference template — not deployed directly.
+# install.sh generates the live unit with ExecStart resolved to the repo path.
+# Run: sudo bash kernel-monitor/install.sh
+
+[Unit]
+Description=Kernel dmesg monitor for I2S/audio driver alarms
+After=local-fs.target systemd-journald.service
+DefaultDependencies=no
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 /path/to/kernel-monitor/monitor.py
+Restart=on-failure
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=kernel-monitor
+User=root
+
+[Install]
+WantedBy=multi-user.target
