@@ -47,7 +47,7 @@ forked_assistant/
 | EU-3b | Track 1: IPC harness (fork + real SHM/pipe, no Pipecat) | Complete (`test/track1_ipc_harness.py`) |
 | EU-3c | Track 2: Pipeline harness (real Pipecat + stub IPC) | Complete (`test/track2_pipeline_harness.py`) |
 | EU-3d | Merge: Track 1 + Track 2 into real recorder child | Complete (`src/recorder_child.py`, `test/test_harness.py`) |
-| EU-4 | Master process — batch mode (STT + Claude) | Ready for Pi test (`src/master.py`) |
+| EU-4 | Master process — batch mode (STT + Claude) | Complete (`src/master.py`, proven 2026-04-03) |
 
 EU-3b and EU-3c are **parallel tracks** that can be developed independently. EU-3d merges them.
 
@@ -67,24 +67,28 @@ Test files add `sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..',
 
 ## What's Next
 
-### EU-4 — ready for Pi test
+### EU-5 — streaming STT extension (future)
 
-`src/master.py` is written and ready for first Pi run. Test sequence:
+Batch-mode EU-4 is proven. EU-5 adds streaming STT: on WAKE_DETECTED, opens a Deepgram live WebSocket and tails the ring buffer, sending chunks as they arrive. Uses a configurable termination policy (VAD_STOPPED after N seconds silence, explicit command, or timeout). The ring buffer + signal design was chosen to enable this without changing the recorder child. See `spec/implementation_framework.md` EU-5 for scope.
 
-1. `cd ~/raspberry-ai/mvp-modules/forked_assistant && source ~/pipecat-agent/venv/bin/activate`
-2. Ensure `DEEPGRAM_API_KEY` is set (export or `~/.env`)
-3. `python src/master.py`
-4. Say "hey Jarvis", speak a question, pause — expect transcript + Claude response
-5. Repeat for 3+ turns to confirm stability
-6. Ctrl+C from any state — expect clean exit, no Pi reboot
+### Stability validation — multi-turn (pending)
 
-**Success criteria (from implementation_framework.md):** Complete voice turn (wake → capture → STT → Claude → return to listening) across the process boundary. Survive 3–5 consecutive turns without degradation. Clean shutdown from any state.
-
-### EU-5 — future
-
-Streaming STT extension. Not required for first working delivery.
+EU-4 has one confirmed successful voice turn (2026-04-03) with clean shutdown. The success criteria require 3–5 consecutive turns without degradation. This has not been run yet. Before EU-5, confirm:
+- 3+ consecutive wake→capture→STT→Claude→wake_listen cycles without drift
+- Clean Ctrl+C from CAPTURE state (current test was from WAKE_LISTEN)
+- No queue depth alarms over extended runtime
 
 ## Completed Effort Units
+
+### EU-4 — complete (2026-04-03)
+
+Master process batch mode (`src/master.py`) proven on Pi across three runs:
+
+- **Run 1:** Audio driver buffer overrun, transcription failed. Root cause: capture span started at VAD_STARTED, discarding utterance onset.
+- **Run 2:** Span start fixed to wake_pos. Transcription succeeded ("Hello?", 1.71s latency). Pi rebooted on Ctrl+C — SIGINT race: child called `task.cancel()` directly, bypassing `stop_stream()`.
+- **Run 3:** Two-phase shutdown protocol implemented. Voice turn complete (score 0.879, 3.12s, "Hello.", 1.82s STT). Clean Ctrl+C shutdown: SHUTDOWN_COMMENCED → stream stopped → pipeline drained → SHUTDOWN_FINISHED → `[master] done`. No reboot. 0/485 frames over budget.
+
+Key changes to `recorder_child.py`: `_initiate_shutdown()` once-only coroutine, SIGINT/SIGTERM/SHUTDOWN all converge to it. Key changes to `master.py`: `shutdown_child()` waits for SHUTDOWN_FINISHED, `master_loop` returns on SHUTDOWN_COMMENCED, `shutdown_child` runs in `finally` on all exit paths. Protocol documented in `interface_spec.md` §3 and `memory/shutdown_and_buffer_patterns.md` Root Cause 4.
 
 ### EU-3d — complete (2026-04-02)
 

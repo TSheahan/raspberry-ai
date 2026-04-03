@@ -35,7 +35,30 @@ After a cognitive loop has run, Ctrl+C triggers a race between PyAudio's callbac
 
 **Mitigation (single-process):** Pause PyAudio stream during cognitive loop. Stop stream on `CancelFrame` before normal cancel path runs. These reduce the window but do not eliminate the race.
 
-**Resolution:** Two-process architecture. Master sends SHUTDOWN command; recorder child tears down on its own schedule. If hung, SIGKILL — a killed child process doesn't reboot the Pi.
+**Partial resolution:** Two-process architecture. Recorder child tears down independently; a killed child doesn't reboot the Pi. But the race can still occur *within* the child if SIGINT reaches it directly and triggers `task.cancel()` without first stopping the stream. See Root Cause 4 below.
+
+## Root Cause 4: SIGINT in Child Bypasses Stream-Stop Ordering (Two-Process)
+
+In the two-process architecture, `^C` delivers SIGINT to the **entire process group** — both master and child simultaneously. If the child's SIGINT handler calls `task.cancel()` directly, the `CancelFrame` path may call `stop_stream()` while the PortAudio callback thread is still active. This is the same USB race as Root Cause 3, now occurring within the child.
+
+**Symptom (2026-04-03, run 2):** Pi rebooted on Ctrl+C after one successful voice turn. Child's `finally` block never ran — no QDEPTH summary, no `[child] exiting`. `client_loop: send disconnect: Connection reset`.
+
+**Critical ordering invariant:** `stop_stream()` must complete (with a settle period) **before** `task.cancel()` is called. The ALSA/PortAudio callback thread must be quiesced before CancelFrame propagates through the pipeline.
+
+**Fix — two-phase shutdown protocol (proven 2026-04-03):** A single `_initiate_shutdown()` coroutine with a once-only guard handles SIGINT, SIGTERM, and the SHUTDOWN pipe command:
+
+```
+1. Send SHUTDOWN_COMMENCED to master (over pipe)
+2. state.set_phase("dormant") — stops PyAudio stream, 100ms settle
+3. task.cancel() — CancelFrame propagates against a stopped audio source
+4. Print diagnostics (QDEPTH, duty cycle)
+5. Send SHUTDOWN_FINISHED to master
+6. Close SharedMemory, exit process
+```
+
+The master waits for SHUTDOWN_FINISHED on all exit paths (KeyboardInterrupt, normal return, EOFError) before cleaning up SharedMemory. SIGINT is deferred at process entry (`SIG_IGN`) to close the narrow window before the event loop installs its handler.
+
+**Confirmed clean shutdown (2026-04-03, run 3):** QDEPTH summary printed, full duty cycle summary printed, SHUTDOWN_FINISHED received by master, clean shell prompt, no reboot.
 
 ## OWW State Reset Protocol
 
@@ -55,6 +78,6 @@ Implementation: `asyncio.create_task()` the reset-then-resume sequence, never sy
 |---|---|
 | Calling `stop_stream()`/`start_stream()` synchronously from `process_frame` | PortAudio deadlock or USB fault |
 | Manual `transport.cleanup()` in `finally` blocks | Double-cleanup races with Pipecat teardown |
-| Custom SIGINT handler | Bypasses Pipecat's CancelFrame propagation |
+| SIGINT handler calling `task.cancel()` directly | Skips stream-stop ordering → same USB race as Root Cause 3/4 |
 | `np.append` in any frame-processing hot path | O(n) copy → ALSA underrun → USB hang → reboot |
 | Unbounded queue without backpressure | Silent frame accumulation until cascade |

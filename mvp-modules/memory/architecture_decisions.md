@@ -170,6 +170,27 @@ The dispatch overhead (~4ms) is irrelevant — predict is now off the critical p
 
 **Confirmed ring buffer health (same run):** `rms=168.6`, `zeros=0`, `stale=False` — the buffer writes and reads are mechanically correct. The truncation was purely a span-selection bug, not a buffer or transport issue.
 
+## Two-Phase Shutdown Protocol (2026-04-03)
+
+**Status: implemented and proven (2026-04-03, run 3).**
+
+The two-process architecture isolates the recorder child from the master's cognitive loop, but SIGINT is delivered to the entire process group — both processes simultaneously. A naive SIGINT handler in the child that calls `task.cancel()` directly reproduces the same PortAudio/USB race as the single-process crash (Root Cause 3/4 in `shutdown_and_buffer_patterns.md`).
+
+**Resolution:** A unified `_initiate_shutdown()` coroutine in the child with a once-only guard. All three shutdown triggers (SIGINT, SIGTERM, SHUTDOWN pipe command) converge to this single path. The invariant is: `stop_stream()` completes before `task.cancel()` fires.
+
+Two new pipe signals carry shutdown progress to the master:
+
+| Signal | Meaning |
+|---|---|
+| `SHUTDOWN_COMMENCED` | Child has begun teardown — master exits its receive loop |
+| `SHUTDOWN_FINISHED` | Child cleanup complete — master may safely unlink SharedMemory |
+
+**Why SHUTDOWN_FINISHED matters:** SharedMemory is created and owned by the master. If the master unlinks it while the child is still in `shm.close()`, the child gets a use-after-free. The master's `shutdown_child()` drains the pipe waiting for SHUTDOWN_FINISHED (5s deadline) before proceeding with cleanup, escalating to SIGTERM then SIGKILL only if the deadline passes.
+
+**SIGINT defer window:** `signal.signal(SIGINT, SIG_IGN)` at child process entry closes the narrow race between fork and `loop.add_signal_handler(SIGINT, ...)`. The event loop handler overrides it immediately on entry to `asyncio.run()`.
+
+See `interface_spec.md` §3 Shutdown sequence for the full protocol diagram.
+
 ## Why Recorder Is Capture-Only
 
 The recorder child owns the microphone and nothing else. Playback (TTS) belongs to the master or a future separate process. This keeps the child simple and aligned with the ReSpeaker hat's input-focused design. It also avoids bidirectional audio I/O races in the same process.
