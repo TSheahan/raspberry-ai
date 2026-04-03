@@ -167,13 +167,40 @@ def cognitive_loop(audio_bytes: bytes, dg_client: DeepgramClient) -> None:
 # ---------------------------------------------------------------------------
 
 def shutdown_child(pipe, child: Process) -> None:
+    """Wait for child to complete safe shutdown, escalating if necessary.
+
+    Sends SHUTDOWN command (idempotent — child may already be tearing down
+    from its own SIGINT). Then drains the pipe looking for SHUTDOWN_FINISHED.
+    If the child doesn't finish within the deadline, escalates to SIGTERM,
+    then SIGKILL.
+    """
     try:
         pipe.send({"cmd": "SHUTDOWN"})
     except Exception:
         pass
-    child.join(timeout=3)
+
+    deadline = time.time() + 5
+    finished = False
+    while time.time() < deadline and child.is_alive():
+        try:
+            if pipe.poll(0.2):
+                msg = pipe.recv()
+                cmd = msg.get("cmd")
+                if cmd == "SHUTDOWN_COMMENCED":
+                    print("[master] child: shutdown commenced")
+                elif cmd == "SHUTDOWN_FINISHED":
+                    print("[master] child: shutdown finished")
+                    finished = True
+                    break
+        except (EOFError, OSError):
+            break
+
+    child.join(timeout=2)
     if child.is_alive():
-        print("[master] child did not exit — terminating")
+        if not finished:
+            print("[master] no SHUTDOWN_FINISHED — terminating child")
+        else:
+            print("[master] child did not exit after SHUTDOWN_FINISHED — terminating")
         child.terminate()
         child.join(timeout=2)
     if child.is_alive():
@@ -265,6 +292,10 @@ def master_loop(pipe, shm: SharedMemory, child: Process) -> None:
                 processing = False
                 print("\nListening for wake word...\n")
 
+        elif cmd == "SHUTDOWN_COMMENCED":
+            print("[master] child initiated shutdown")
+            return
+
         elif cmd == "ERROR":
             print(f"[master] ERROR from child: {msg.get('msg', '?')}")
 
@@ -296,10 +327,10 @@ def main() -> None:
         master_loop(parent_conn, shm, child)
     except KeyboardInterrupt:
         print("\n[master] Ctrl+C — shutting down")
-        shutdown_child(parent_conn, child)
     except EOFError:
         print("[master] pipe broken — recorder child likely crashed")
     finally:
+        shutdown_child(parent_conn, child)
         parent_conn.close()
         try:
             shm.unlink()

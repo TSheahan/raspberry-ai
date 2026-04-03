@@ -148,6 +148,8 @@ These report events observed by the recorder child.
 | `STATE_CHANGED` | `{"state": str}` | Acknowledgement that the recorder has entered the requested state. |
 | `ERROR` | `{"msg": str}` | Something went wrong in the recorder child. |
 | `READY` | — | Recorder child has initialized and is ready to accept commands. |
+| `SHUTDOWN_COMMENCED` | — | Child has begun safe teardown (stream stopping, pipeline draining). Sent once, on first shutdown trigger. |
+| `SHUTDOWN_FINISHED` | — | Child teardown complete. Process is about to exit. Master may proceed with cleanup. |
 
 ### Typical turn sequence
 
@@ -223,19 +225,34 @@ while True:
 
 ### Shutdown sequence
 
+Shutdown may be triggered by either side:
+
+- **External ^C (SIGINT):** Delivered to the process group. Both master and child receive it. The child initiates safe teardown from its SIGINT handler. The master catches KeyboardInterrupt and enters the shutdown wait path.
+- **Master-initiated:** Master sends SHUTDOWN over pipe (e.g., future programmatic shutdown). Child receives it via command_listener and initiates safe teardown.
+- **Child-initiated SIGTERM:** Master's escalation path. Child receives SIGTERM and initiates safe teardown.
+
+Regardless of trigger, the child runs the same once-only teardown sequence:
+
 ```
-1. Master sends SHUTDOWN over pipe
-2. Recorder child receives SHUTDOWN:
-   a. Sets state to DORMANT (stops stream)
-   b. Calls pa.terminate()
-   c. Closes shared memory
-   d. Exits process
-3. Master waits on child.join(timeout=3)
-4. If child hasn't exited: child.terminate() (SIGTERM)
-5. Master waits on child.join(timeout=2)
-6. If still alive: child.kill() (SIGKILL)
-7. Master unlinks SharedMemory
+Child teardown (once-only, first trigger wins):
+  1. Send SHUTDOWN_COMMENCED to master
+  2. set_phase("dormant") — stops PyAudio stream, 100ms settle
+  3. Cancel pipeline task — CancelFrame propagates, pipeline drains
+  4. Print diagnostics (queue depth summary, duty cycle if enabled)
+  5. Send SHUTDOWN_FINISHED to master
+  6. Close shared memory, exit process
+
+Master wait path (runs on all exit paths via finally):
+  1. Send SHUTDOWN command on pipe (idempotent — child may already be tearing down)
+  2. Drain pipe, waiting for SHUTDOWN_FINISHED (5s deadline)
+  3. child.join(timeout=2)
+  4. If child hasn't exited: child.terminate() (SIGTERM → triggers same safe teardown)
+  5. child.join(timeout=2)
+  6. If still alive: child.kill() (SIGKILL)
+  7. Unlink SharedMemory
 ```
+
+**Critical invariant:** The master MUST wait for SHUTDOWN_FINISHED (or pipe close / timeout) before proceeding with SharedMemory cleanup. The child's stream-stop-first ordering is what prevents the PortAudio/USB race condition that causes Pi reboots.
 
 ### Crash recovery
 
