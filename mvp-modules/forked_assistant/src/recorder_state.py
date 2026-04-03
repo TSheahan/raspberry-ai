@@ -28,10 +28,15 @@ wiring so that RecorderStateStub inherits them without overriding.
 """
 
 import asyncio
+import logging
 import time
 import weakref
 
 import numpy as np
+
+from log_config import TRACE
+
+logger = logging.getLogger("recorder_state")
 
 
 class RecorderState:
@@ -193,20 +198,20 @@ class RecorderState:
         t = self._transport_ref
         if t and hasattr(t, '_in_stream') and t._in_stream:
             t._in_stream.start_stream()
-            print("  [state] stream started")
+            logger.debug("[state] stream started")
         else:
-            print("  [stream] start skipped — no truthy _in_stream")
+            logger.warning("[stream] start skipped — no truthy _in_stream")
 
     async def _stop_stream(self) -> None:
         """Stop the PyAudio input stream."""
         t = self._transport_ref
         if t and hasattr(t, '_in_stream') and t._in_stream:
-            print("  [state] stream to stop..")
+            logger.debug("[state] stream to stop..")
             t._in_stream.stop_stream()
             await asyncio.sleep(0.1)
-            print("  [state] stream stopped")
+            logger.debug("[state] stream stopped")
         else:
-            print("  [stream] stop skipped — no truthy _in_stream")
+            logger.warning("[stream] stop skipped — no truthy _in_stream")
 
     # -----------------------------------------------------------------------
     # OWW / Silero ops  (EU-3c fills real impls on base using _oww_ref / _vad_ref)
@@ -223,9 +228,9 @@ class RecorderState:
             return
         pending = getattr(oww, '_pending_predict', None)
         if pending and not pending.done():
-            print("  [state] draining pending OWW predict...")
+            logger.debug("[state] draining pending OWW predict...")
             await pending
-            print("  [state] OWW predict drained")
+            logger.debug("[state] OWW predict drained")
 
     def _reset_oww_full(self) -> None:
         """Full 5-buffer OWW reset: prediction_buffer, raw_data_buffer,
@@ -249,7 +254,7 @@ class RecorderState:
             pp.accumulated_samples = 0
         oww._chunks = []
         oww.last_detection_time = time.time()
-        print("  [state] OWW full reset")
+        logger.debug("[state] OWW full reset")
 
     def _clear_oww(self) -> None:
         """Clear OWW pending chunk accumulator (lighter than full reset).
@@ -259,7 +264,7 @@ class RecorderState:
         if oww is None:
             return
         oww._chunks = []
-        print("  [state] OWW chunks cleared")
+        logger.log(TRACE, "[state] OWW chunks cleared")
 
     async def _reset_silero(self) -> None:
         """Reset Silero LSTM hidden states.
@@ -272,9 +277,9 @@ class RecorderState:
             model = vad._vad_analyzer._model
             if hasattr(model, 'reset_states'):
                 model.reset_states()
-                print("  [state] Silero LSTM reset")
+                logger.debug("[state] Silero LSTM reset")
                 return
-        print("  [state] WARNING: could not find Silero _model.reset_states()")
+        logger.warning("[state] could not find Silero _model.reset_states()")
 
     # -----------------------------------------------------------------------
     # Frame counters  (concrete; called by processors per frame)

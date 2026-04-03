@@ -19,6 +19,7 @@ multiprocessing.Process target by the master.
 """
 
 import asyncio
+import logging
 import math
 import os
 import signal
@@ -28,6 +29,10 @@ import time
 import numpy as np
 from collections import defaultdict, deque
 from multiprocessing.shared_memory import SharedMemory
+
+from log_config import configure_logging, TRACE
+
+logger = logging.getLogger("recorder_child")
 
 from openwakeword.model import Model as OWWModel
 
@@ -93,9 +98,8 @@ class QueueDepthMonitor:
         if qd > self.ALARM_THRESHOLD:
             self._alarm_count += 1
             self._consecutive_alarms += 1
-            print(f"  [QDEPTH ALARM] depth={qd} "
-                  f"consecutive={self._consecutive_alarms} "
-                  f"total={self._alarm_count} max_seen={self._max_depth_seen}")
+            logger.warning("[QDEPTH ALARM] depth=%d consecutive=%d total=%d max_seen=%d",
+                           qd, self._consecutive_alarms, self._alarm_count, self._max_depth_seen)
         else:
             self._consecutive_alarms = 0
         return qd
@@ -204,9 +208,9 @@ class DutyCycleCollector:
         if self._window_max_qdepth >= 0:
             qdepth_str = f"  q_max={self._window_max_qdepth}"
 
-        print(f"  [DUTY/{self._total_frames}] {phase_lbl}: "
-              f"mean={mean:.1f}ms p95={p95:.1f}ms max={mx:.1f}ms "
-              f"util={util:.0f}%{arrival_str}{qdepth_str}")
+        logger.log(TRACE, "[DUTY/%d] %s: mean=%.1fms p95=%.1fms max=%.1fms util=%.0f%%%s%s",
+                   self._total_frames, phase_lbl, mean, p95, mx, util,
+                   arrival_str, qdepth_str)
 
         self._window.clear()
         self._window_arrivals.clear()
@@ -214,9 +218,7 @@ class DutyCycleCollector:
         self._window_start_phase = self._state.phase
 
     def print_final_summary(self, wake_processor=None) -> None:
-        print("\n" + "=" * 64)
-        print("DUTY CYCLE SUMMARY")
-        print("=" * 64)
+        lines = ["\n" + "=" * 64, "DUTY CYCLE SUMMARY", "=" * 64]
 
         for phase in ("wake_listen", "capture", "dormant"):
             samples = self._phase_samples.get(phase)
@@ -230,8 +232,8 @@ class DutyCycleCollector:
             mx   = s[-1]
             util = mean / FRAME_DURATION_MS * 100.0
 
-            print(f"\n  {phase}  ({n} frames, budget util {util:.0f}%)")
-            print(f"    mean={mean:.1f}ms  p95={p95:.1f}ms  p99={p99:.1f}ms  max={mx:.1f}ms")
+            lines.append(f"\n  {phase}  ({n} frames, budget util {util:.0f}%)")
+            lines.append(f"    mean={mean:.1f}ms  p95={p95:.1f}ms  p99={p99:.1f}ms  max={mx:.1f}ms")
 
             edges = HISTOGRAM_EDGES_MS
             buckets = [0] * (len(edges))
@@ -253,16 +255,16 @@ class DutyCycleCollector:
                     label = f">{edges[-1]:<2} ms"
                 pct = count / n * 100.0
                 bar = "\u2588" * max(1, int(count / bar_max * 30)) if count else ""
-                print(f"    {label}: {count:>5} ({pct:4.0f}%)  {bar}")
+                lines.append(f"    {label}: {count:>5} ({pct:4.0f}%)  {bar}")
 
         over = sum(1 for samples in self._phase_samples.values()
                    for v in samples if v > FRAME_DURATION_MS)
         total = sum(len(s) for s in self._phase_samples.values())
-        print(f"\n  Frames over {FRAME_DURATION_MS:.0f}ms budget: "
-              f"{over}/{total}" + (f" ({over/total*100:.1f}%)" if total else ""))
+        lines.append(f"\n  Frames over {FRAME_DURATION_MS:.0f}ms budget: "
+                     f"{over}/{total}" + (f" ({over/total*100:.1f}%)" if total else ""))
 
         if self._phase_arrivals:
-            print(f"\n  Arrival cadence (inter-frame intervals):")
+            lines.append("\n  Arrival cadence (inter-frame intervals):")
             for phase in ("wake_listen", "capture", "dormant"):
                 arrivals = self._phase_arrivals.get(phase)
                 if not arrivals:
@@ -272,14 +274,15 @@ class DutyCycleCollector:
                 a_mean = sum(sa) / n
                 a_var = sum((x - a_mean) ** 2 for x in sa) / n
                 a_std = a_var ** 0.5
-                print(f"    {phase} ({n}): mean={a_mean:.1f}ms σ={a_std:.1f}ms "
-                      f"min={sa[0]:.1f}ms max={sa[-1]:.1f}ms")
+                lines.append(f"    {phase} ({n}): mean={a_mean:.1f}ms σ={a_std:.1f}ms "
+                              f"min={sa[0]:.1f}ms max={sa[-1]:.1f}ms")
 
         if wake_processor:
-            print()
-            print(wake_processor.predict_summary())
+            lines.append("")
+            lines.append(wake_processor.predict_summary())
 
-        print("=" * 64)
+        lines.append("=" * 64)
+        logger.info("\n".join(lines))
 
 
 # noinspection DuplicatedCode
@@ -307,8 +310,8 @@ class DutyCycleEntry(FrameProcessor):
         sr = getattr(frame, 'sample_rate', '?')
         ch = getattr(frame, 'num_channels', '?')
         dur = f"{samples / sr * 1000:.1f}ms" if isinstance(sr, (int, float)) and sr > 0 else "?"
-        print(f"  [DUTY] First audio frame: {audio_bytes} bytes, "
-              f"{samples} samples, sr={sr} Hz, ch={ch}, duration={dur}")
+        logger.debug("[DUTY] first audio frame: %d bytes, %d samples, sr=%s Hz, ch=%s, duration=%s",
+                     audio_bytes, samples, sr, ch, dur)
 
 
 class DutyCycleExit(FrameProcessor):
@@ -388,12 +391,12 @@ class GatedVADProcessor(FrameProcessor):
 
         @self._vad_controller.event_handler("on_speech_started")
         async def on_speech_started(_controller):
-            print(f"  [VAD] speech_started (after {self.state.vad_frame_count} frames)")
+            logger.info("[VAD] speech_started (after %d frames)", self.state.vad_frame_count)
             self.state.signal_vad_started()
 
         @self._vad_controller.event_handler("on_speech_stopped")
         async def on_speech_stopped(_controller):
-            print(f"  [VAD] speech_stopped (after {self.state.vad_frame_count} frames)")
+            logger.info("[VAD] speech_stopped (after %d frames)", self.state.vad_frame_count)
             self.state.signal_vad_stopped()
 
         @self._vad_controller.event_handler("on_push_frame")
@@ -436,7 +439,7 @@ class OpenWakeWordProcessor(FrameProcessor):
     def __init__(self, state: RecorderState):
         super().__init__()
         self.state = state
-        print("Loading openwakeword models...")
+        logger.info("loading openwakeword models...")
         self.model = OWWModel()
         self._chunks = []
         self.last_detection_time = 0.0
@@ -445,7 +448,7 @@ class OpenWakeWordProcessor(FrameProcessor):
         self._predict_count: int = 0
         self._frames_in_wake: int = 0
         self._pending_predict: asyncio.Task | None = None
-        print("openwakeword ready")
+        logger.info("openwakeword ready")
 
     async def process_frame(self, frame: Frame, direction):
         await super().process_frame(frame, direction)
@@ -496,7 +499,7 @@ class OpenWakeWordProcessor(FrameProcessor):
                         and score > 0.5
                         and (current_time - self.last_detection_time)
                             > self.DEBOUNCE_SECONDS):
-                    print(f"\nWAKE DETECTED -- '{wakeword}'  |  score: {score:.3f}")
+                    logger.info("WAKE DETECTED -- '%s'  |  score: %.3f", wakeword, score)
                     self.last_detection_time = current_time
                     self.state.signal_wake_detected(score, wakeword)
 
@@ -553,9 +556,8 @@ class AudioFrameWriter(FrameProcessor):
 
             if phase != self._last_phase:
                 if self._last_phase:
-                    print(f"  [ring/write] phase {self._last_phase}→{phase}: "
-                          f"wrote {self._phase_frames} frames, "
-                          f"write_pos={self.state.write_pos}")
+                    logger.debug("[ring/write] phase %s→%s: wrote %d frames, write_pos=%d",
+                                 self._last_phase, phase, self._phase_frames, self.state.write_pos)
                 self._phase_frames = 0
                 self._last_phase = phase
 
@@ -566,9 +568,8 @@ class AudioFrameWriter(FrameProcessor):
             if self._phase_frames == 1 or self._phase_frames % self._LOG_INTERVAL == 0:
                 wp = self.state.write_pos
                 head = struct.unpack_from('<4h', frame.audio)
-                print(f"  [ring/write] phase={phase} "
-                      f"frame={self._phase_frames} write_pos={wp} "
-                      f"sample[0:4]={head}")
+                logger.log(TRACE, "[ring/write] phase=%s frame=%d write_pos=%d sample[0:4]=%s",
+                           phase, self._phase_frames, wp, head)
 
         await self.push_frame(frame, direction)
 
@@ -593,7 +594,7 @@ async def command_listener(state: RecorderChild, pipe, initiate_shutdown) -> Non
             elif cmd == "SET_DORMANT":
                 await state.set_phase("dormant")
             elif cmd == "SHUTDOWN":
-                print("  [child] SHUTDOWN command received")
+                logger.info("[child] SHUTDOWN command received")
                 await initiate_shutdown()
                 return
         await asyncio.sleep(0.010)
@@ -647,10 +648,10 @@ async def recorder_child_main(pipe, shm_name: str) -> None:
         async def cancel_with_stream_stop(frame):
             stream = getattr(input_transport, '_in_stream', None)
             if stream and stream.is_active():
-                print("  [child] stopping PyAudio stream before teardown")
+                logger.info("[child] stopping PyAudio stream before teardown")
                 stream.stop_stream()
             else:
-                print("  [child] stream already stopped before teardown")
+                logger.debug("[child] stream already stopped before teardown")
             await asyncio.sleep(0.1)
             await original_cancel(frame)
         input_transport.cancel = cancel_with_stream_stop
@@ -667,11 +668,11 @@ async def recorder_child_main(pipe, shm_name: str) -> None:
         task = PipelineTask(pipeline)
 
         pipe.send({"cmd": "READY"})
-        print(f"  [child] queue depth monitor ENABLED "
-              f"(alarm threshold={QueueDepthMonitor.ALARM_THRESHOLD})")
+        logger.info("[child] queue depth monitor ENABLED (alarm threshold=%d)",
+                    QueueDepthMonitor.ALARM_THRESHOLD)
         if duty_collector:
-            print(f"  [child] duty cycle probe ENABLED "
-                  f"(window={DUTY_CYCLE_WINDOW} frames, budget={FRAME_DURATION_MS:.0f}ms)")
+            logger.info("[child] duty cycle probe ENABLED (window=%d frames, budget=%.0fms)",
+                        DUTY_CYCLE_WINDOW, FRAME_DURATION_MS)
 
         loop = asyncio.get_running_loop()
         shutdown_initiated = False
@@ -693,13 +694,13 @@ async def recorder_child_main(pipe, shm_name: str) -> None:
                 pipe.send({"cmd": "SHUTDOWN_COMMENCED"})
             except Exception:
                 pass
-            print("  [child] shutdown commenced — draining pipeline...")
+            logger.info("[child] shutdown commenced — draining pipeline...")
             await state.set_phase("dormant")
             await task.cancel()
 
         def _on_signal(name):
             if not shutdown_initiated:
-                print(f"\n  [child] {name} — initiating safe shutdown...")
+                logger.info("[child] %s — initiating safe shutdown...", name)
                 asyncio.create_task(_initiate_shutdown())
 
         loop.add_signal_handler(signal.SIGINT, lambda: _on_signal("SIGINT"))
@@ -719,8 +720,8 @@ async def recorder_child_main(pipe, shm_name: str) -> None:
                 await listener
             except asyncio.CancelledError:
                 pass
-            print(f"  [QDEPTH] max_depth_seen={qdepth_monitor.max_depth_seen} "
-                  f"total_alarms={qdepth_monitor._alarm_count}")
+            logger.info("[QDEPTH] max_depth_seen=%d total_alarms=%d",
+                        qdepth_monitor.max_depth_seen, qdepth_monitor._alarm_count)
             if duty_collector:
                 duty_collector.print_final_summary(wake_processor)
             for sig in (signal.SIGINT, signal.SIGTERM):
@@ -728,11 +729,11 @@ async def recorder_child_main(pipe, shm_name: str) -> None:
     finally:
         try:
             pipe.send({"cmd": "SHUTDOWN_FINISHED"})
-            print("  [child] SHUTDOWN_FINISHED sent")
+            logger.info("[child] SHUTDOWN_FINISHED sent")
         except Exception:
             pass
         shm.close()
-        print("  [child] exiting")
+        logger.info("[child] exiting")
 
 
 # ---------------------------------------------------------------------------
@@ -747,5 +748,6 @@ def recorder_child_entry(pipe, shm_name: str) -> None:
     ^C arrives between process start and handler registration.
     """
     signal.signal(signal.SIGINT, signal.SIG_IGN)
+    configure_logging()
     os.sched_setaffinity(0, {0})
     asyncio.run(recorder_child_main(pipe, shm_name))

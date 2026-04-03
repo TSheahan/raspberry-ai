@@ -18,8 +18,13 @@ Memory layout (HEADER_SIZE + RING_SIZE bytes):
 Write protocol: data is written before write_pos is advanced.
 Read protocol:  read write_pos first; data is valid if (write_pos - start) <= RING_SIZE.
 """
+import logging
 import struct
 from multiprocessing.shared_memory import SharedMemory
+
+from log_config import TRACE
+
+logger = logging.getLogger("ring_buffer")
 
 # --- Layout ---
 HEADER_SIZE = 64
@@ -54,6 +59,8 @@ def init_header(shm: SharedMemory) -> None:
     struct.pack_into('<H', shm.buf, _CH, CHANNELS)
     struct.pack_into('<H', shm.buf, _SW, SAMPLE_WIDTH)
     struct.pack_into('<I', shm.buf, _FS, FRAME_BYTES)
+    logger.debug("header initialized: sr=%d ch=%d sw=%d frame=%d bytes",
+                 SAMPLE_RATE, CHANNELS, SAMPLE_WIDTH, FRAME_BYTES)
 
 
 def read_header(shm: SharedMemory) -> dict:
@@ -97,6 +104,7 @@ class RingBufferWriter:
         # Advance after data is in place (ARM64: aligned Q store is atomic)
         self._write_pos += n
         struct.pack_into('<Q', self._shm.buf, _WP, self._write_pos)
+        logger.log(TRACE, "write %d bytes at pos %d", n, self._write_pos)
 
 
 # ---------------------------------------------------------------------------
@@ -129,6 +137,7 @@ class RingBufferReader:
             return b''
         base   = HEADER_SIZE
         offset = start_pos % RING_SIZE
+        logger.debug("read %d bytes [%d:%d]", length, start_pos, end_pos)
         if offset + length <= RING_SIZE:
             return bytes(self._shm.buf[base + offset : base + offset + length])
         split  = RING_SIZE - offset

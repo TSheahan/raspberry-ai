@@ -23,6 +23,7 @@ Usage (on Pi with ReSpeaker):
 """
 
 import datetime
+import logging
 import os
 import struct
 import subprocess
@@ -39,6 +40,10 @@ from dotenv import load_dotenv
 load_dotenv(override=True)
 
 from deepgram import DeepgramClient
+
+from log_config import configure_logging, TRACE
+
+logger = logging.getLogger("master")
 
 # Set SAVE_CAPTURE_WAV=<path> to write each ring-buffer span to disk before STT.
 # The value must be a path to an existing directory; ~ is expanded.
@@ -64,7 +69,9 @@ def run_claude(transcript: str) -> str:
         capture_output=True, text=True, timeout=30,
     )
     if result.returncode != 0:
-        return f"[claude error: {result.stderr.strip()}]"
+        err = result.stderr.strip()
+        logger.error("[claude] subprocess error: %s", err)
+        return f"[claude error: {err}]"
     return result.stdout.strip()
 
 
@@ -81,7 +88,7 @@ def transcribe(audio_bytes: bytes, dg_client: DeepgramClient) -> str:
             wf.writeframes(audio_bytes)
         tmp_path = tmp.name
 
-    print("  Sending audio to Deepgram Nova-3...")
+    logger.info("sending audio to Deepgram Nova-3...")
     try:
         with open(tmp_path, "rb") as f:
             response = dg_client.listen.v1.media.transcribe_file(
@@ -93,16 +100,15 @@ def transcribe(audio_bytes: bytes, dg_client: DeepgramClient) -> str:
         try:
             transcript = response.results.channels[0].alternatives[0].transcript.strip()
         except (AttributeError, IndexError, TypeError) as e:
-            print(f"  [dg] response structure unexpected: {e}")
-            print(f"  [dg] raw response: {response}")
+            logger.warning("[dg] response structure unexpected: %s", e)
+            logger.debug("[dg] raw response: %s", response)
             return ""
         if not transcript:
-            print(f"  [dg] response ok but transcript is empty "
-                  f"(confidence="
-                  f"{response.results.channels[0].alternatives[0].confidence:.3f})")
+            logger.warning("[dg] response ok but transcript is empty (confidence=%.3f)",
+                           response.results.channels[0].alternatives[0].confidence)
         return transcript
     except Exception as e:
-        print(f"  Deepgram error: {e}")
+        logger.error("Deepgram error: %s", e)
         return ""
     finally:
         os.unlink(tmp_path)
@@ -121,7 +127,8 @@ def _save_wav_debug(audio_bytes: bytes) -> None:
     if not _WAV_SCRATCH_DIR:
         return
     if not os.path.isdir(_WAV_SCRATCH_DIR):
-        print(f"  [wav] SAVE_CAPTURE_WAV={_WAV_SCRATCH_DIR!r} is not an existing directory — skipping")
+        logger.warning("[wav] SAVE_CAPTURE_WAV=%r is not an existing directory — skipping",
+                       _WAV_SCRATCH_DIR)
         return
     ts = datetime.datetime.now().strftime("%Y-%m-%dT%H%M%S")
     path = os.path.join(_WAV_SCRATCH_DIR, f"{ts}_capture.wav")
@@ -130,7 +137,7 @@ def _save_wav_debug(audio_bytes: bytes) -> None:
         wf.setsampwidth(SAMPLE_WIDTH)
         wf.setframerate(SAMPLE_RATE)
         wf.writeframes(audio_bytes)
-    print(f"  [wav] saved → {path}")
+    logger.debug("[wav] saved → %s", path)
 
 
 # ---------------------------------------------------------------------------
@@ -139,7 +146,7 @@ def _save_wav_debug(audio_bytes: bytes) -> None:
 
 def cognitive_loop(audio_bytes: bytes, dg_client: DeepgramClient) -> None:
     duration = len(audio_bytes) / (SAMPLE_RATE * SAMPLE_WIDTH)
-    print(f"  Captured {duration:.1f}s of audio")
+    logger.info("captured %.1fs of audio", duration)
     _save_wav_debug(audio_bytes)
     loop_start = time.time()
 
@@ -147,19 +154,19 @@ def cognitive_loop(audio_bytes: bytes, dg_client: DeepgramClient) -> None:
     stt_elapsed = time.time() - loop_start
 
     if not transcript:
-        print("  No transcript returned.")
+        logger.warning("no transcript returned")
         return
 
-    print(f"  TRANSCRIPT: {transcript}")
-    print(f"  STT latency: {stt_elapsed:.2f}s")
+    logger.info("TRANSCRIPT: %s", transcript)
+    logger.info("STT latency: %.2fs", stt_elapsed)
 
     claude_start = time.time()
     response = run_claude(transcript)
     claude_elapsed = time.time() - claude_start
 
-    print(f"\n  CLAUDE RESPONSE:\n  {response}\n")
-    print(f"  Claude latency: {claude_elapsed:.2f}s")
-    print(f"  Total loop latency: {time.time() - loop_start:.2f}s")
+    logger.info("CLAUDE RESPONSE:\n%s", response)
+    logger.info("Claude latency: %.2fs", claude_elapsed)
+    logger.info("total loop latency: %.2fs", time.time() - loop_start)
 
 
 # ---------------------------------------------------------------------------
@@ -187,9 +194,9 @@ def shutdown_child(pipe, child: Process) -> None:
                 msg = pipe.recv()
                 cmd = msg.get("cmd")
                 if cmd == "SHUTDOWN_COMMENCED":
-                    print("[master] child: shutdown commenced")
+                    logger.info("[master] child: shutdown commenced")
                 elif cmd == "SHUTDOWN_FINISHED":
-                    print("[master] child: shutdown finished")
+                    logger.info("[master] child: shutdown finished")
                     finished = True
                     break
         except (EOFError, OSError):
@@ -198,13 +205,13 @@ def shutdown_child(pipe, child: Process) -> None:
     child.join(timeout=2)
     if child.is_alive():
         if not finished:
-            print("[master] no SHUTDOWN_FINISHED — terminating child")
+            logger.warning("[master] no SHUTDOWN_FINISHED — terminating child")
         else:
-            print("[master] child did not exit after SHUTDOWN_FINISHED — terminating")
+            logger.warning("[master] child did not exit after SHUTDOWN_FINISHED — terminating")
         child.terminate()
         child.join(timeout=2)
     if child.is_alive():
-        print("[master] child still alive — killing")
+        logger.error("[master] child still alive — killing")
         child.kill()
 
 
@@ -222,30 +229,30 @@ def master_loop(pipe, shm: SharedMemory, child: Process) -> None:
     msg = pipe.recv()
     if msg["cmd"] != "READY":
         raise RuntimeError(f"Expected READY, got {msg}")
-    print("[master] recorder child READY")
+    logger.info("[master] recorder child READY")
 
     pipe.send({"cmd": "SET_WAKE_LISTEN"})
-    print("Listening for wake word...\n")
+    logger.info("listening for wake word...")
 
     while True:
         msg = pipe.recv()
         cmd = msg["cmd"]
 
         if cmd == "STATE_CHANGED":
-            print(f"[master] state -> {msg['state']}")
+            logger.debug("[master] state -> %s", msg['state'])
 
         elif cmd == "WAKE_DETECTED":
             if processing:
-                print("[master] (still processing previous utterance, ignoring wake)")
+                logger.warning("[master] still processing previous utterance, ignoring wake")
                 continue
             wake_pos = msg["write_pos"]
-            print(f"[master] WAKE_DETECTED  score={msg['score']:.3f}  "
-                  f"keyword={msg['keyword']}")
+            logger.info("[master] WAKE_DETECTED  score=%.3f  keyword=%s",
+                        msg['score'], msg['keyword'])
             pipe.send({"cmd": "SET_CAPTURE"})
 
         elif cmd == "VAD_STARTED":
             vad_start_pos = msg["write_pos"]
-            print(f"[master] VAD_STARTED    write_pos={vad_start_pos}")
+            logger.info("[master] VAD_STARTED    write_pos=%d", vad_start_pos)
 
         elif cmd == "VAD_STOPPED":
             end_pos = msg["write_pos"]
@@ -260,17 +267,17 @@ def master_loop(pipe, shm: SharedMemory, child: Process) -> None:
             stale = ring_reader.is_stale(start)
             vad_gap = vad_start_pos - wake_pos if vad_start_pos else 0
             vad_gap_s = vad_gap / (SAMPLE_RATE * SAMPLE_WIDTH)
-            print(f"[master] VAD_STOPPED    write_pos={end_pos}")
-            print(f"  [ring] span: start={start}(wake)  end={end_pos}  "
-                  f"bytes={span}  dur={dur_s:.2f}s")
-            print(f"  [ring] vad_start={vad_start_pos}  "
-                  f"vad_gap={vad_gap}b ({vad_gap_s:.2f}s pre-speech dropped previously)")
-            print(f"  [ring] live write_pos={live_wp}  stale={stale}")
+            logger.info("[master] VAD_STOPPED    write_pos=%d", end_pos)
+            logger.debug("[ring] span: start=%d(wake)  end=%d  bytes=%d  dur=%.2fs",
+                         start, end_pos, span, dur_s)
+            logger.debug("[ring] vad_start=%d  vad_gap=%db (%.2fs pre-speech dropped previously)",
+                         vad_start_pos, vad_gap, vad_gap_s)
+            logger.debug("[ring] live write_pos=%d  stale=%s", live_wp, stale)
 
             audio_bytes = ring_reader.read(start, end_pos)
 
             if not audio_bytes:
-                print(f"  [ring] read returned empty  (span={span}  stale={stale})")
+                logger.warning("[ring] read returned empty  (span=%d  stale=%s)", span, stale)
             else:
                 n_samples = len(audio_bytes) // SAMPLE_WIDTH
                 samples = struct.unpack_from(f'<{n_samples}h', audio_bytes)
@@ -278,26 +285,26 @@ def master_loop(pipe, shm: SharedMemory, child: Process) -> None:
                 rms = (sum(s * s for s in samples) / n_samples) ** 0.5
                 head = samples[:8]
                 tail = samples[-4:]
-                print(f"  [ring] read ok: {len(audio_bytes)} bytes  "
-                      f"{n_samples} samples  zeros={zero_samples}  rms={rms:.1f}")
-                print(f"  [ring] head={head}  tail={tail}")
+                logger.debug("[ring] read ok: %d bytes  %d samples  zeros=%d  rms=%.1f",
+                             len(audio_bytes), n_samples, zero_samples, rms)
+                logger.log(TRACE, "[ring] head=%s  tail=%s", head, tail)
 
             pipe.send({"cmd": "SET_WAKE_LISTEN"})
             processing = True
             try:
                 cognitive_loop(audio_bytes, dg_client)
             except Exception as e:
-                print(f"  Cognitive loop error: {e}")
+                logger.error("cognitive loop error: %s", e)
             finally:
                 processing = False
-                print("\nListening for wake word...\n")
+                logger.info("listening for wake word...")
 
         elif cmd == "SHUTDOWN_COMMENCED":
-            print("[master] child initiated shutdown")
+            logger.info("[master] child initiated shutdown")
             return
 
         elif cmd == "ERROR":
-            print(f"[master] ERROR from child: {msg.get('msg', '?')}")
+            logger.error("[master] ERROR from child: %s", msg.get('msg', '?'))
 
 
 # ---------------------------------------------------------------------------
@@ -305,6 +312,8 @@ def master_loop(pipe, shm: SharedMemory, child: Process) -> None:
 # ---------------------------------------------------------------------------
 
 def main() -> None:
+    configure_logging()
+
     if not os.environ.get("DEEPGRAM_API_KEY"):
         sys.exit("DEEPGRAM_API_KEY not set. Export it or add to ~/.env")
 
@@ -321,14 +330,14 @@ def main() -> None:
     child.start()
     child_conn.close()
 
-    print(f"[master] recorder child spawned (pid={child.pid})")
+    logger.info("[master] recorder child spawned (pid=%d)", child.pid)
 
     try:
         master_loop(parent_conn, shm, child)
     except KeyboardInterrupt:
-        print("\n[master] Ctrl+C — shutting down")
+        logger.info("[master] Ctrl+C — shutting down")
     except EOFError:
-        print("[master] pipe broken — recorder child likely crashed")
+        logger.error("[master] pipe broken — recorder child likely crashed")
     finally:
         shutdown_child(parent_conn, child)
         parent_conn.close()
@@ -338,7 +347,7 @@ def main() -> None:
             pass
         shm.close()
 
-    print("[master] done")
+    logger.info("[master] done")
 
 
 if __name__ == "__main__":
