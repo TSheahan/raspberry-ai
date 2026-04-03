@@ -311,6 +311,27 @@ Remaining validation before step 7 closes: (1) confirm Claude response text prin
 
 **Step 8 (TTS → audio output) is driven from `starting_brief.md` scope**, not from `forked_assistant/`. The handoff point is: step 7 delivers text response to stdout; step 8 feeds that text to Piper and plays audio through device index 0. The `forked_assistant/` architecture requires no further changes for step 8 — TTS runs in the master process (cores 1–3) after EU-6's `run_claude_streaming()` returns each text chunk.
 
+### Post-EU-6: Step 7 Delivery Packaging
+
+After EU-6 is confirmed on Pi and all step 7 completion criteria are checked, perform the following before starting step 8:
+
+**Deliverable refactor:** The four platform files are the step 7 delivery artifact:
+- `src/ring_buffer.py`
+- `src/recorder_state.py`
+- `src/recorder_child.py`
+- `src/master.py`
+
+Copy or move these from `forked_assistant/src/` to `mvp-modules/deliverables/step7/`. This mirrors the pattern established in `mvp-modules/deliverables/` for prior steps and marks `forked_assistant/` as a concluded development effort.
+
+**Markdown updates at delivery boundary:**
+- `mvp-modules/starting_brief.md` — record step 7 complete, note the two-process architecture as the delivery mechanism, summarise latency observations from EU-5/EU-6 runs
+- `mvp-modules/forked_assistant/AGENTS.md` — mark all EUs complete, update What's Next to step 8
+- `spec/implementation_framework.md` — mark EU-5, EU-6 complete; record final run data
+- `memory/architecture_decisions.md` and `memory/shutdown_and_buffer_patterns.md` — any remaining session findings
+- `mvp-modules/INDEX.md` — add step 7 deliverables entry if the index tracks deliverables
+
+**Scope note:** `forked_assistant/spec/`, `test/`, and `archive/` remain in place as the development record. Only `src/` is promoted to `deliverables/`. The specs are the supporting documentation for the delivered code and should be cross-referenced from the deliverables entry.
+
 ---
 
 ## Prerequisite Smoke Tests (not in EU integration path)
@@ -380,6 +401,9 @@ EU-3b (Track 1:        EU-3c (Track 2:        ← parallel
              │
              ▼
         *** Step 7 complete — forked_assistant/ closes ***
+             │
+             ├── Delivery packaging: src/ → mvp-modules/deliverables/step7/
+             ├── starting_brief.md step 7 marked complete
              │
              ▼
         Step 8: TTS → audio output  (driven from starting_brief.md)
