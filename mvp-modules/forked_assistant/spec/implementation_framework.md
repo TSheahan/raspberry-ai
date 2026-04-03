@@ -203,7 +203,7 @@ Duty cycle measurement revealed OWW `model.predict()` blocked the event loop for
 - `asyncio.to_thread` for blocking STT and Claude calls, same as v10a
 - Ring buffer read replaces the `self._chunks` accumulation pattern
 
-**EU-4 code complete (2026-04-03), pending Pi validation.**
+**EU-4 complete (2026-04-03). All success criteria met.**
 
 Master is synchronous (no asyncio in the master process). The event loop blocks on `pipe.recv()`, processes signals, and runs the cognitive loop inline. During the cognitive loop, the recorder child is already back in `wake_listen` (SET_WAKE_LISTEN is sent before the cognitive loop starts). Pipe messages from the child buffer in the kernel during processing; drained on return. A `processing` flag gates WAKE_DETECTED to prevent overlapping cognitive loops.
 
@@ -235,7 +235,15 @@ STT uses `DeepgramClient.listen.rest.v("1").transcribe_file()` (file-based batch
 
 **Fix applied — two-phase shutdown protocol:** The child now handles SIGINT, SIGTERM, and SHUTDOWN pipe commands through a single `_initiate_shutdown()` with a once-only guard. The safe sequence is always: send `SHUTDOWN_COMMENCED` → `set_phase("dormant")` (stops stream, 100ms settle) → `task.cancel()` (pipeline drains) → cleanup → send `SHUTDOWN_FINISHED`. The master waits for `SHUTDOWN_FINISHED` on all exit paths (KeyboardInterrupt, normal return, EOFError) before cleaning up SharedMemory. `cancel_with_stream_stop` checks `stream.is_active()` to avoid redundant stop on the SHUTDOWN path where `set_phase("dormant")` already stopped the stream. See updated `interface_spec.md` §3 Shutdown sequence for the full protocol.
 
-**TODO — logging uplift:** All diagnostic output in `recorder_child.py`, `master.py`, and `recorder_state.py` currently uses bare `print()`. This is sufficient for early debugging but should be replaced with structured `logging` calls (using a per-module logger, configurable level, and consistent format) before the system is considered production-ready. The uplift should cover: child-side ring/write and duty-cycle lines, state transition lines, master-side ring diagnostics and cognitive-loop timing lines, and the queue-depth alarm output. No functional change — purely a logging hygiene pass. Track as a post-EU-4-validation cleanup task.
+**Third Pi run (2026-04-03, run 3) — EU-4 success criteria met:**
+
+- Wake detected (score 0.879), 3.12s capture, rms=610.3, Deepgram transcribed "Hello." in 1.82s
+- Queue depth: q_max=0 throughout, 0 alarms, 0/485 frames over 20ms budget
+- Ctrl+C from WAKE_LISTEN: clean two-phase shutdown — SHUTDOWN_COMMENCED received, stream stopped, pipeline drained, SHUTDOWN_FINISHED received, `[master] done`, no Pi reboot
+
+Remaining validation: multi-turn stability (3–5 consecutive turns) and Ctrl+C from CAPTURE state not yet exercised. Track as pre-EU-5 checkpoint.
+
+**TODO — logging uplift:** All diagnostic output in `recorder_child.py`, `master.py`, and `recorder_state.py` currently uses bare `print()`. This is sufficient for early debugging but should be replaced with structured `logging` calls (using a per-module logger, configurable level, and consistent format) before the system is considered production-ready. No functional change — purely a logging hygiene pass. Track as a post-EU-4 cleanup task alongside multi-turn validation.
 
 **Estimated scope:** ~120 lines. One session, assuming EU-3 is proven.
 
@@ -251,7 +259,7 @@ STT uses `DeepgramClient.listen.rest.v("1").transcribe_file()` (file-based batch
 3. Receives partial transcripts
 4. Uses a configurable termination policy (VAD_STOPPED after N seconds silence, explicit command, timeout)
 
-**This is a future effort unit.** Not required for first working delivery. Listed here for architectural awareness — the ring buffer + signal design was chosen specifically to enable this without changing the recorder child.
+**Next effort unit after EU-4 multi-turn validation.** EU-4 (batch mode) is the first working delivery. EU-5 extends it without changing the recorder child — the ring buffer + signal design was chosen specifically to enable this.
 
 **Estimated scope:** ~100 lines added to master. Requires Deepgram live API integration (separate from the file-based API used in batch mode).
 
@@ -312,13 +320,15 @@ EU-3b (Track 1:        EU-3c (Track 2:        ← parallel
            EU-3d (Merge → recorder_child.py + test_harness.py)
              │
              ▼
-           EU-4 (Master process — batch mode)
+           EU-4 (Master process — batch mode)  ← complete
+             │
+             ├── multi-turn validation (3–5 turns, Ctrl+C from CAPTURE)
              │
              ▼
-           EU-5 (Master process — streaming)  ← future
+           EU-5 (Master process — streaming)  ← next
 ```
 
-EU-1, EU-2, EU-3a can be done in one session. EU-3b and EU-3c are parallel — assign to separate sessions. EU-3d is the merge, requires both tracks complete. EU-4 is mostly rearranging proven code. EU-5 is an extension.
+EU-1, EU-2, EU-3a can be done in one session. EU-3b and EU-3c are parallel — assign to separate sessions. EU-3d is the merge, requires both tracks complete. EU-4 is complete — first working delivery. EU-5 is the next extension.
 
 ---
 
