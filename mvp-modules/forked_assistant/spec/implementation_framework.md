@@ -241,7 +241,7 @@ STT uses `DeepgramClient.listen.rest.v("1").transcribe_file()` (file-based batch
 - Queue depth: q_max=0 throughout, 0 alarms, 0/485 frames over 20ms budget
 - Ctrl+C from WAKE_LISTEN: clean two-phase shutdown — SHUTDOWN_COMMENCED received, stream stopped, pipeline drained, SHUTDOWN_FINISHED received, `[master] done`, no Pi reboot
 
-Remaining validation: multi-turn stability (3–5 consecutive turns) and Ctrl+C from CAPTURE state not yet exercised. Track as pre-EU-5 checkpoint.
+Remaining validation before step 7 closes: (1) confirm Claude response text prints on a full turn; (2) multi-turn stability (3–5 consecutive turns); (3) Ctrl+C from CAPTURE state. These are a single Pi session.
 
 **TODO — logging uplift:** All diagnostic output in `recorder_child.py`, `master.py`, and `recorder_state.py` currently uses bare `print()`. This is sufficient for early debugging but should be replaced with structured `logging` calls (using a per-module logger, configurable level, and consistent format) before the system is considered production-ready. No functional change — purely a logging hygiene pass. Track as a post-EU-4 cleanup task alongside multi-turn validation.
 
@@ -249,19 +249,67 @@ Remaining validation: multi-turn stability (3–5 consecutive turns) and Ctrl+C 
 
 ---
 
-### EU-5: Master Process — Streaming Extension
+### EU-5: Master Process — Streaming STT
 
-**Goal:** Add streaming STT support so the master can tail the ring buffer for extended dictation.
+**Goal:** Replace the batch STT path with a live Deepgram WebSocket session that tails the ring buffer as the recorder child writes it. Streaming STT is required before step 7 closes — it is not optional. The ring buffer + signal protocol was designed specifically to make this possible without touching the recorder child.
 
-**Deliverable:** Streaming mode in master that:
+**Deliverable:** Streaming mode in `src/master.py` that:
 1. On WAKE_DETECTED: opens a Deepgram live WebSocket session
-2. Tails ring buffer, sending chunks to the WebSocket
-3. Receives partial transcripts
-4. Uses a configurable termination policy (VAD_STOPPED after N seconds silence, explicit command, timeout)
+2. Spawns a ring buffer tail loop that reads newly written frames and sends them to the WebSocket
+3. Receives and accumulates partial transcripts
+4. Terminates on VAD_STOPPED (the primary policy); ring tail stops, final transcript assembled
+5. Passes completed transcript to EU-6's `run_claude_streaming()` (see below)
+6. Sends SET_WAKE_LISTEN and returns to listening
 
-**Next effort unit after EU-4 multi-turn validation.** EU-4 (batch mode) is the first working delivery. EU-5 extends it without changing the recorder child — the ring buffer + signal design was chosen specifically to enable this.
+**Termination policy note:** VAD_STOPPED is the initial termination trigger (same timing as EU-4's batch mode). The architecture supports extending this to a timeout fallback or explicit command without changing the recorder child.
 
-**Estimated scope:** ~100 lines added to master. Requires Deepgram live API integration (separate from the file-based API used in batch mode).
+**Recorder child changes:** None. The child already writes continuously to the ring buffer and sends VAD_STARTED / VAD_STOPPED over the pipe. EU-5 is entirely a master-side change.
+
+**Implementation notes:**
+- Deepgram live WebSocket: `dg_client.listen.live.v("1")` with `on_message` callback to accumulate `is_final` transcripts
+- Ring tail loop: poll `ring_reader.write_pos` at ~20ms intervals, send new bytes to the WebSocket, stop on VAD_STOPPED signal from pipe
+- The master is currently synchronous; the ring tail loop will need to run in a thread (`threading.Thread`) alongside the blocking pipe recv, or the master event loop needs a small restructure. Evaluate at implementation time.
+- EU-4's `transcribe()` function is replaced by this path; `cognitive_loop()` gains a streaming STT entry point
+
+**Estimated scope:** ~80 lines added to master. One Pi session.
+
+---
+
+### EU-6: Streaming Claude Response
+
+**Goal:** Replace the blocking `subprocess.run(["claude", "-p", ...])` call with a piped subprocess that streams response text incrementally as it arrives, printing each chunk in real time.
+
+**Deliverable:** `run_claude_streaming(transcript)` function in `src/master.py` that:
+1. Opens `claude -p` as a `subprocess.Popen` with `stdout=PIPE`
+2. Reads stdout in a loop, printing each chunk as it arrives
+3. Accumulates the full response for logging / latency measurement
+4. Returns the complete response text on subprocess exit
+
+**Why this matters for step 7:** The EU-4 batch pattern (`subprocess.run` blocking until Claude exits) means no output appears until the full response is ready — the user hears silence during the Claude call. Streaming output gives progressive feedback that the system is working, and naturally extends to TTS chunking in step 8 (text chunks can be fed to Piper as they arrive without waiting for the full response).
+
+**Implementation notes:**
+- `Popen(["claude", "-p", transcript, "--model", ...], stdout=PIPE, stderr=PIPE, text=True)`
+- Read loop: `for chunk in iter(lambda: proc.stdout.read(64), ""):` or line-by-line via `readline()`
+- Print each chunk immediately; accumulate for full-response return
+- stderr captured separately; log on non-zero exit
+
+**Estimated scope:** ~30 lines replacing `run_claude()`. One session alongside EU-5.
+
+---
+
+### Step 7 Completion Criteria and Step 8 Handoff
+
+`forked_assistant/` closes step 7 when all of the following are confirmed on Pi:
+
+1. ✓ Wake → capture → VAD cycle stable (EU-3d, EU-4)
+2. ✓ Ring buffer span read correct, STT produces transcript (EU-4 runs 2–3)
+3. ✓ Shutdown clean from any state, no Pi reboot (EU-4 run 3)
+4. ☐ Claude response text printed on a full turn (EU-4 validation run)
+5. ☐ Multi-turn: 3–5 consecutive turns without degradation (EU-4 validation run)
+6. ☐ Streaming STT via Deepgram live WebSocket (EU-5)
+7. ☐ Streaming Claude response with incremental text output (EU-6)
+
+**Step 8 (TTS → audio output) is driven from `starting_brief.md` scope**, not from `forked_assistant/`. The handoff point is: step 7 delivers text response to stdout; step 8 feeds that text to Piper and plays audio through device index 0. The `forked_assistant/` architecture requires no further changes for step 8 — TTS runs in the master process (cores 1–3) after EU-6's `run_claude_streaming()` returns each text chunk.
 
 ---
 
@@ -322,13 +370,22 @@ EU-3b (Track 1:        EU-3c (Track 2:        ← parallel
              ▼
            EU-4 (Master process — batch mode)  ← complete
              │
-             ├── multi-turn validation (3–5 turns, Ctrl+C from CAPTURE)
+             ├── EU-4 validation (Claude response confirmed, multi-turn, Ctrl+C from CAPTURE)
              │
              ▼
-           EU-5 (Master process — streaming)  ← next
+           EU-5 (Streaming STT — Deepgram live WebSocket + ring buffer tail)
+             │
+             ▼
+           EU-6 (Streaming Claude — Popen stdout pipe, incremental output)
+             │
+             ▼
+        *** Step 7 complete — forked_assistant/ closes ***
+             │
+             ▼
+        Step 8: TTS → audio output  (driven from starting_brief.md)
 ```
 
-EU-1, EU-2, EU-3a can be done in one session. EU-3b and EU-3c are parallel — assign to separate sessions. EU-3d is the merge, requires both tracks complete. EU-4 is complete — first working delivery. EU-5 is the next extension.
+EU-1 through EU-4 are complete. EU-5 and EU-6 are required to close step 7. EU-5 and EU-6 are master-only changes — the recorder child is frozen. Step 8 is out of scope for `forked_assistant/`.
 
 ---
 
@@ -346,7 +403,7 @@ forked_assistant/
     ring_buffer.py               ← EU-2
     recorder_state.py            ← EU-3a  (RecorderState base class)
     recorder_child.py            ← EU-3d  (merged, permanent)
-    master.py                    ← EU-4
+    master.py                    ← EU-4/EU-5/EU-6 (streaming STT + Claude added here)
   test/
     smoke_test_shm.py            ← EU-1
     track1_ipc_harness.py        ← EU-3b  (throwaway after merge)

@@ -48,6 +48,8 @@ forked_assistant/
 | EU-3c | Track 2: Pipeline harness (real Pipecat + stub IPC) | Complete (`test/track2_pipeline_harness.py`) |
 | EU-3d | Merge: Track 1 + Track 2 into real recorder child | Complete (`src/recorder_child.py`, `test/test_harness.py`) |
 | EU-4 | Master process — batch mode (STT + Claude) | Complete (`src/master.py`, proven 2026-04-03) |
+| EU-5 | Streaming STT — Deepgram live WebSocket + ring buffer tail | Pending (required for step 7) |
+| EU-6 | Streaming Claude — Popen stdout pipe, incremental output | Pending (required for step 7) |
 
 EU-3b and EU-3c are **parallel tracks** that can be developed independently. EU-3d merges them.
 
@@ -67,16 +69,24 @@ Test files add `sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..',
 
 ## What's Next
 
-### EU-5 — streaming STT extension (future)
+### EU-4 validation run (one Pi session, prerequisite for EU-5)
 
-Batch-mode EU-4 is proven. EU-5 adds streaming STT: on WAKE_DETECTED, opens a Deepgram live WebSocket and tails the ring buffer, sending chunks as they arrive. Uses a configurable termination policy (VAD_STOPPED after N seconds silence, explicit command, or timeout). The ring buffer + signal design was chosen to enable this without changing the recorder child. See `spec/implementation_framework.md` EU-5 for scope.
+A single Pi session to close out the remaining EU-4 success criteria:
+- Confirm Claude response text prints on a complete turn (run 3 was interrupted before response)
+- 3–5 consecutive wake→capture→STT→Claude→wake_listen cycles without degradation
+- Ctrl+C from CAPTURE state (run 3 tested from WAKE_LISTEN only)
 
-### Stability validation — multi-turn (pending)
+### EU-5 — Streaming STT (required for step 7 completion)
 
-EU-4 has one confirmed successful voice turn (2026-04-03) with clean shutdown. The success criteria require 3–5 consecutive turns without degradation. This has not been run yet. Before EU-5, confirm:
-- 3+ consecutive wake→capture→STT→Claude→wake_listen cycles without drift
-- Clean Ctrl+C from CAPTURE state (current test was from WAKE_LISTEN)
-- No queue depth alarms over extended runtime
+Add Deepgram live WebSocket STT in master: on WAKE_DETECTED, open a live session, tail the ring buffer at ~20ms intervals sending chunks, accumulate `is_final` transcripts, terminate on VAD_STOPPED. No recorder child changes. See `spec/implementation_framework.md` EU-5 for full spec.
+
+### EU-6 — Streaming Claude response (required for step 7 completion)
+
+Replace `subprocess.run(["claude", "-p", ...])` with `Popen` + stdout pipe, printing response text incrementally as it arrives. ~30 lines replacing `run_claude()`. See `spec/implementation_framework.md` EU-6 for spec.
+
+### Step 7 closes on EU-6 delivery
+
+`forked_assistant/` is the delivery vehicle for `starting_brief.md` step 7 (agentic layer → text response). Step 8 (TTS → audio output) is driven from `starting_brief.md` scope and requires no changes to the recorder child or the process architecture.
 
 ## Completed Effort Units
 
