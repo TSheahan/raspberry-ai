@@ -223,6 +223,18 @@ STT uses `DeepgramClient.listen.rest.v("1").transcribe_file()` (file-based batch
   - Confirm the ring buffer read is producing valid audio (not zeros, not truncated)
 - Implement as a thin wrapper in `cognitive_loop()` — one `wave.open()` write after `ring_reader.read()`, before `transcribe()` is called. Zero impact on normal operation when disabled.
 
+**Second Pi run findings (2026-04-03, run 2):**
+
+1. **Capture and STT working.** WAKE_DETECTED (score 0.912) → CAPTURE → VAD cycle completed successfully. Ring buffer read produced 120320 bytes (3.76s), rms=695.1, zeros=0. WAV saved, Deepgram transcribed "Hello?" with 1.71s latency. Adopting WAKE_DETECTED as the capture commencement signal (replacing VAD_STARTED) resolved the truncated transcript issue from run 1.
+
+2. **Queue depth: clean throughout.** All duty cycle reports showed q_max=0. No QDEPTH ALARMs fired. Utilization peaked at 26% during capture. This confirms the prior analysis (`archive/alarming_queue_depths/`) — the crash vector is not pipeline backpressure.
+
+3. **Pi crash during Ctrl+C shutdown.** `client_loop: send disconnect: Connection reset` — Pi rebooted. The child's `finally` block never ran (no `[QDEPTH]` summary, no `[child] exiting`).
+
+**Root cause: SIGINT race condition.** ^C delivers SIGINT to the entire process group. The child's signal handler called `task.cancel()` directly, bypassing `set_phase("dormant")`. This meant `stop_stream()` was called from the CancelFrame handler while the PortAudio callback thread was still active — the exact race documented in `shutdown_and_buffer_patterns.md` (Root Cause 3). The spec (interface_spec.md §3 Shutdown sequence) requires the child to tear down exclusively via the SHUTDOWN pipe command, which ensures stream-stop-first ordering.
+
+**Fix applied:** Child now ignores SIGINT (`signal.signal(signal.SIGINT, signal.SIG_IGN)` at process entry). Shutdown is exclusively via SHUTDOWN pipe command from master. SIGTERM retained as fallback escalation with proper `set_phase("dormant")` before `task.cancel()`. The `cancel_with_stream_stop` hook now checks `stream.is_active()` to avoid redundant stop on the SHUTDOWN path.
+
 **TODO — logging uplift:** All diagnostic output in `recorder_child.py`, `master.py`, and `recorder_state.py` currently uses bare `print()`. This is sufficient for early debugging but should be replaced with structured `logging` calls (using a per-module logger, configurable level, and consistent format) before the system is considered production-ready. The uplift should cover: child-side ring/write and duty-cycle lines, state transition lines, master-side ring diagnostics and cognitive-loop timing lines, and the queue-depth alarm output. No functional change — purely a logging hygiene pass. Track as a post-EU-4-validation cleanup task.
 
 **Estimated scope:** ~120 lines. One session, assuming EU-3 is proven.

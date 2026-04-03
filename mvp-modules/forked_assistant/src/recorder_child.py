@@ -27,7 +27,6 @@ import time
 
 import numpy as np
 from collections import defaultdict, deque
-from functools import partial
 from multiprocessing.shared_memory import SharedMemory
 
 from openwakeword.model import Model as OWWModel
@@ -578,10 +577,10 @@ class AudioFrameWriter(FrameProcessor):
 # command_listener — routes pipe commands to state.set_phase()
 # ---------------------------------------------------------------------------
 
-async def command_listener(state: RecorderChild, pipe, pipeline_task) -> None:
+async def command_listener(state: RecorderChild, pipe, initiate_shutdown) -> None:
     """Poll pipe for master commands; call set_phase() on each.
 
-    Returns (and cancels the pipeline) on SHUTDOWN.
+    Returns on SHUTDOWN (after delegating to initiate_shutdown).
     """
     while True:
         if pipe.poll(0):
@@ -594,9 +593,8 @@ async def command_listener(state: RecorderChild, pipe, pipeline_task) -> None:
             elif cmd == "SET_DORMANT":
                 await state.set_phase("dormant")
             elif cmd == "SHUTDOWN":
-                print("  [child] SHUTDOWN received")
-                await state.set_phase("dormant")
-                await pipeline_task.cancel()
+                print("  [child] SHUTDOWN command received")
+                await initiate_shutdown()
                 return
         await asyncio.sleep(0.010)
 
@@ -647,9 +645,12 @@ async def recorder_child_main(pipe, shm_name: str) -> None:
 
         original_cancel = input_transport.cancel
         async def cancel_with_stream_stop(frame):
-            if hasattr(input_transport, '_in_stream') and input_transport._in_stream:
+            stream = getattr(input_transport, '_in_stream', None)
+            if stream and stream.is_active():
                 print("  [child] stopping PyAudio stream before teardown")
-                input_transport._in_stream.stop_stream()
+                stream.stop_stream()
+            else:
+                print("  [child] stream already stopped before teardown")
             await asyncio.sleep(0.1)
             await original_cancel(frame)
         input_transport.cancel = cancel_with_stream_stop
@@ -673,19 +674,40 @@ async def recorder_child_main(pipe, shm_name: str) -> None:
                   f"(window={DUTY_CYCLE_WINDOW} frames, budget={FRAME_DURATION_MS:.0f}ms)")
 
         loop = asyncio.get_running_loop()
-        shutdown_via_signal = False
+        shutdown_initiated = False
 
-        def on_signal(sig):
-            nonlocal shutdown_via_signal
-            if not shutdown_via_signal:
-                shutdown_via_signal = True
-                print(f"\n  [child] {sig} — cancelling pipeline...")
-                asyncio.create_task(task.cancel())
+        async def _initiate_shutdown():
+            """Unified shutdown path for both SIGINT and SHUTDOWN command.
 
-        for sig in (signal.SIGINT, signal.SIGTERM):
-            loop.add_signal_handler(sig, partial(on_signal, sig.name))
+            Once-only guard: first caller wins, subsequent calls are no-ops.
+            Sends SHUTDOWN_COMMENCED, does the safe teardown sequence
+            (stop stream via set_phase dormant, then cancel pipeline),
+            then returns. SHUTDOWN_FINISHED is sent from the finally block
+            after all cleanup completes.
+            """
+            nonlocal shutdown_initiated
+            if shutdown_initiated:
+                return
+            shutdown_initiated = True
+            try:
+                pipe.send({"cmd": "SHUTDOWN_COMMENCED"})
+            except Exception:
+                pass
+            print("  [child] shutdown commenced — draining pipeline...")
+            await state.set_phase("dormant")
+            await task.cancel()
 
-        listener = asyncio.create_task(command_listener(state, pipe, task))
+        def _on_signal(name):
+            if not shutdown_initiated:
+                print(f"\n  [child] {name} — initiating safe shutdown...")
+                asyncio.create_task(_initiate_shutdown())
+
+        loop.add_signal_handler(signal.SIGINT, lambda: _on_signal("SIGINT"))
+        loop.add_signal_handler(signal.SIGTERM, lambda: _on_signal("SIGTERM"))
+
+        listener = asyncio.create_task(
+            command_listener(state, pipe, _initiate_shutdown)
+        )
 
         try:
             await runner.run(task)
@@ -704,6 +726,11 @@ async def recorder_child_main(pipe, shm_name: str) -> None:
             for sig in (signal.SIGINT, signal.SIGTERM):
                 loop.remove_signal_handler(sig)
     finally:
+        try:
+            pipe.send({"cmd": "SHUTDOWN_FINISHED"})
+            print("  [child] SHUTDOWN_FINISHED sent")
+        except Exception:
+            pass
         shm.close()
         print("  [child] exiting")
 
@@ -713,6 +740,12 @@ async def recorder_child_main(pipe, shm_name: str) -> None:
 # ---------------------------------------------------------------------------
 
 def recorder_child_entry(pipe, shm_name: str) -> None:
-    """Pin to core 0, then run the async recorder child main loop."""
+    """Pin to core 0, then run the async recorder child main loop.
+
+    SIGINT is deferred (SIG_IGN) until the asyncio event loop installs its
+    own handler via add_signal_handler. This prevents a narrow race where
+    ^C arrives between process start and handler registration.
+    """
+    signal.signal(signal.SIGINT, signal.SIG_IGN)
     os.sched_setaffinity(0, {0})
     asyncio.run(recorder_child_main(pipe, shm_name))
