@@ -200,8 +200,6 @@ class RecorderState:
     async def _start_stream(self) -> None:
         """Start the PyAudio input stream."""
         t = self._transport_ref
-        if t and hasattr(t, '_stop_producing'):
-            t._stop_producing = False
         if t and hasattr(t, '_in_stream') and t._in_stream:
             t._in_stream.start_stream()
             logger.debug("[state] stream started")
@@ -209,29 +207,16 @@ class RecorderState:
             logger.warning("[stream] start skipped — no truthy _in_stream")
 
     async def _stop_stream(self) -> None:
-        """Stop the PyAudio input stream via callback self-termination.
+        """Stop the PyAudio input stream.
 
-        Sets _stop_producing flag so the (monkey-patched) callback returns
-        paComplete on its next invocation, causing PortAudio to stop the
-        stream from within the callback thread.  This avoids calling
-        Pa_StopStream() from a different thread, which can trigger a USB
-        subsystem fault on Pi 4 with ReSpeaker (Root Cause 5).
+        Sleeps briefly after stopping to let the driver's I2C teardown
+        path drain before any subsequent close/cleanup.
         """
         t = self._transport_ref
-        if t and hasattr(t, '_stop_producing'):
-            logger.debug("[state] signaling callback paComplete...")
-            t._stop_producing = True
-            await asyncio.sleep(0.1)
-            stream = getattr(t, '_in_stream', None)
-            if stream and stream.is_active():
-                logger.warning("[state] stream still active after 100ms settle — paComplete may not have fired")
-            else:
-                logger.debug("[state] stream stopped via paComplete")
-        elif t and hasattr(t, '_in_stream') and t._in_stream:
-            logger.warning("[state] no _stop_producing flag — falling back to stop_stream()")
+        if t and hasattr(t, '_in_stream') and t._in_stream:
             t._in_stream.stop_stream()
             await asyncio.sleep(0.1)
-            logger.debug("[state] stream stopped (legacy)")
+            logger.debug("[state] stream stopped")
         else:
             logger.warning("[stream] stop skipped — no truthy _in_stream")
 

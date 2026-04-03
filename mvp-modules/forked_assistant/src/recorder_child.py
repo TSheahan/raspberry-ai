@@ -28,7 +28,6 @@ import struct
 import time
 
 import numpy as np
-import pyaudio
 from collections import defaultdict, deque
 from multiprocessing.shared_memory import SharedMemory
 
@@ -648,21 +647,6 @@ async def recorder_child_main(pipe, shm_name: str) -> None:
 
         qdepth_monitor = QueueDepthMonitor(transport_input=input_transport)
 
-        # --- Callback guard: safe stream shutdown via paComplete ---
-        # Pa_StopStream() from outside the callback thread can trigger a USB
-        # subsystem fault on Pi 4 with ReSpeaker, rebooting the Pi (Root Cause 5).
-        # Instead, we signal the callback to return paComplete, which makes
-        # PortAudio stop the stream internally from within the callback thread.
-        input_transport._stop_producing = False
-        _real_callback = input_transport._audio_in_callback
-
-        def _guarded_callback(in_data, frame_count, time_info, status):
-            if input_transport._stop_producing:
-                return (None, pyaudio.paComplete)
-            return _real_callback(in_data, frame_count, time_info, status)
-
-        input_transport._audio_in_callback = _guarded_callback
-
         duty_cycle_on = _duty_cycle_enabled()
 
         vad_processor = GatedVADProcessor(
@@ -686,37 +670,6 @@ async def recorder_child_main(pipe, shm_name: str) -> None:
         state.set_vad(vad_processor)
         state.set_oww(wake_processor)
         state.set_ring_writer(audio_writer)
-
-        # --- Monkey-patch cancel() to use flag-based stop (no Pa_StopStream) ---
-        original_cancel = input_transport.cancel
-
-        async def cancel_with_flag_stop(frame):
-            if not input_transport._stop_producing:
-                input_transport._stop_producing = True
-                logger.info("[child] signaled callback paComplete before cancel")
-                await asyncio.sleep(0.1)
-            else:
-                logger.debug("[child] callback already signaled before cancel")
-            await original_cancel(frame)
-
-        input_transport.cancel = cancel_with_flag_stop
-
-        # --- Monkey-patch cleanup() to skip stop_stream() AND close() ---
-        # Pipecat's LocalAudioInputTransport.cleanup() calls stop_stream() then
-        # close(). Both Pa_StopStream and Pa_CloseStream interact with the USB
-        # subsystem and can trigger the xHCI fault on Pi 4 (Root Cause 5).
-        # We skip both: the stream was already stopped via paComplete, and the
-        # kernel will release the USB device when the child process exits.
-        from pipecat.processors.frame_processor import FrameProcessor as _FP
-
-        async def _safe_cleanup():
-            await _FP.cleanup(input_transport)
-            # Null out _in_stream so nothing else tries to touch it.
-            # Don't call close() — let kernel process-exit cleanup handle USB.
-            input_transport._in_stream = None
-            logger.debug("[child] cleanup: skipped stream close (kernel will release)")
-
-        input_transport.cleanup = _safe_cleanup
 
         processors = [input_transport]
         if duty_collector:
@@ -811,13 +764,6 @@ def recorder_child_entry(pipe, shm_name: str) -> None:
     SIGINT is deferred (SIG_IGN) until the asyncio event loop installs its
     own handler via add_signal_handler. This prevents a narrow race where
     ^C arrives between process start and handler registration.
-
-    os._exit(0) after asyncio.run prevents Python's destructor cleanup from
-    calling PyAudio.terminate() → Pa_Terminate(), which closes all open
-    PortAudio streams at the C level — triggering the same xHCI USB fault
-    as Pa_StopStream/Pa_CloseStream (Root Cause 5).  All Python-level
-    shutdown work (QDEPTH summary, SHUTDOWN_FINISHED, shm.close) completes
-    inside asyncio.run before os._exit fires.
     """
     signal.signal(signal.SIGINT, signal.SIG_IGN)
     configure_logging()
@@ -832,4 +778,3 @@ def recorder_child_entry(pipe, shm_name: str) -> None:
         except PermissionError:
             logger.warning("[child] could not elevate priority")
     asyncio.run(recorder_child_main(pipe, shm_name))
-    os._exit(0)
