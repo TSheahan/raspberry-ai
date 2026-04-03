@@ -40,13 +40,11 @@ load_dotenv(override=True)
 
 from deepgram import DeepgramClient
 
-# Set SAVE_CAPTURE_WAV=1 to write each ring-buffer span to disk before STT.
-# WAV_SCRATCH_DIR controls the destination (default: ~/raspberry-ai/scratch/executions/).
-# Lets you inspect captured audio independently of the Deepgram call.
-SAVE_CAPTURE_WAV = os.environ.get("SAVE_CAPTURE_WAV", "0") == "1"
-_WAV_SCRATCH_DIR = os.path.expanduser(
-    os.environ.get("WAV_SCRATCH_DIR", "~/raspberry-ai/scratch/executions")
-)
+# Set SAVE_CAPTURE_WAV=<path> to write each ring-buffer span to disk before STT.
+# The value must be a path to an existing directory; ~ is expanded.
+# When unset or empty, saving is disabled. No separate flag needed.
+# Example: SAVE_CAPTURE_WAV=~/raspberry-ai/scratch/executions python master.py
+_WAV_SCRATCH_DIR = os.path.expanduser(os.environ.get("SAVE_CAPTURE_WAV", ""))
 
 from recorder_child import recorder_child_entry
 from ring_buffer import (
@@ -115,10 +113,16 @@ def transcribe(audio_bytes: bytes, dg_client: DeepgramClient) -> str:
 # ---------------------------------------------------------------------------
 
 def _save_wav_debug(audio_bytes: bytes) -> None:
-    """Write audio_bytes to a timestamped WAV file when SAVE_CAPTURE_WAV=1."""
-    if not SAVE_CAPTURE_WAV:
+    """Write audio_bytes to a timestamped WAV file when SAVE_CAPTURE_WAV is set.
+
+    SAVE_CAPTURE_WAV must be a path to an existing directory. Prints a warning
+    and skips silently if the directory does not exist.
+    """
+    if not _WAV_SCRATCH_DIR:
         return
-    os.makedirs(_WAV_SCRATCH_DIR, exist_ok=True)
+    if not os.path.isdir(_WAV_SCRATCH_DIR):
+        print(f"  [wav] SAVE_CAPTURE_WAV={_WAV_SCRATCH_DIR!r} is not an existing directory — skipping")
+        return
     ts = datetime.datetime.now().strftime("%Y-%m-%dT%H%M%S")
     path = os.path.join(_WAV_SCRATCH_DIR, f"{ts}_capture.wav")
     with wave.open(path, "wb") as wf:
