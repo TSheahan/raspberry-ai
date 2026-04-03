@@ -12,7 +12,7 @@ Process isolation resolves all three simultaneously:
 |---|---|
 | CPU contention: Claude competes with ONNX inference | Processes on separate cores, no competition |
 | Queue growth: frames accumulate during cognitive loop | Ring buffer at constant rate, no unbounded queue |
-| USB audio starvation from CPU load | Recorder's dedicated core gives uninterrupted USB attention |
+| I2S/DMA starvation from CPU load | Recorder's dedicated core with SCHED_FIFO gives uninterrupted I2S attention |
 | Shutdown race: PyAudio callback vs asyncio teardown | Recorder tears down independently; killed child doesn't reboot Pi |
 
 ## Why SharedMemory + Pipe (not sockets, not files)
@@ -53,11 +53,13 @@ Both processes use a centralized state object that owns all shared mutable state
 
 This pattern maps directly to the two-process design: the recorder child has its own `RecorderState` (DORMANT → WAKE_LISTEN → CAPTURE), and the master will have a `MasterState` with its own phase model.
 
-## Why Core Pinning
+## Why Core Pinning and SCHED_FIFO
 
 Pi 4 has 4 ARM Cortex-A72 cores. The recorder child is pinned to core 0 via `os.sched_setaffinity()` immediately after fork. The master uses cores 1–3.
 
-Pinning prevents the OS scheduler from migrating the recorder process during a latency-sensitive audio callback. USB isochronous transfers are timing-sensitive — a missed deadline at the host controller level can cascade into buffer underruns.
+Pinning prevents the OS scheduler from migrating the recorder process during a latency-sensitive audio callback. The ReSpeaker 4-Mic HAT uses I2S (GPIO header) — audio is transferred via DMA into BCM2835's I2S controller. The PortAudio callback thread must service ALSA's period-ready notifications promptly; if the process is migrated or preempted at the wrong moment, ALSA period callbacks are delayed and the I2S DMA ring can overflow.
+
+The child additionally runs at `SCHED_FIFO` priority 50 (real-time scheduling). Without this, any normal-priority process on core 0 (kernel workers, softirqs, other daemons) can preempt the recorder during ONNX inference and cause duty cycle spikes. Confirmed (2026-04-03): with SCHED_FIFO, duty cycle max during idle is 3.0ms; without it (earlier runs), max reached 49.6ms during the cognitive loop window.
 
 ## ReSpeaker Audio Configuration — Resolved (P-1 2026-04-02)
 
@@ -136,6 +138,7 @@ Capture phase is clean: 7% utilization, all frames <5ms (Silero inference is muc
 
 **Decision: move OWW predict to async (`asyncio.to_thread`) — implemented and proven (2026-04-02)**
 
+
 OWW's `model.predict()` produces a side-channel signal (`signal_wake_detected`), not a frame transformation. There is no data dependency between predict's result and the audio frame flowing downstream. Frames can be pushed immediately; predict runs in background.
 
 ONNX runtime is a C++ extension that releases the GIL during inference. `to_thread` moves predict to a thread pool, freeing the event loop to process frames at steady 20ms cadence while ONNX compute runs concurrently.
@@ -172,9 +175,9 @@ The dispatch overhead (~4ms) is irrelevant — predict is now off the critical p
 
 ## Two-Phase Shutdown Protocol (2026-04-03)
 
-**Status: implemented and proven (2026-04-03, run 3).**
+**Status: implemented and proven for Python-level ordering (2026-04-03, run 3). Kernel-level crash in driver teardown path remains open — see `shutdown_and_buffer_patterns.md` Root Cause 5.**
 
-The two-process architecture isolates the recorder child from the master's cognitive loop, but SIGINT is delivered to the entire process group — both processes simultaneously. A naive SIGINT handler in the child that calls `task.cancel()` directly reproduces the same PortAudio/USB race as the single-process crash (Root Cause 3/4 in `shutdown_and_buffer_patterns.md`).
+The two-process architecture isolates the recorder child from the master's cognitive loop, but SIGINT is delivered to the entire process group — both processes simultaneously. A naive SIGINT handler in the child that calls `task.cancel()` directly reproduces the same PortAudio/I2S race as the single-process crash (Root Cause 3/4 in `shutdown_and_buffer_patterns.md`).
 
 **Resolution:** A unified `_initiate_shutdown()` coroutine in the child with a once-only guard. All three shutdown triggers (SIGINT, SIGTERM, SHUTDOWN pipe command) converge to this single path. The invariant is: `stop_stream()` completes before `task.cancel()` fires.
 
@@ -190,6 +193,47 @@ Two new pipe signals carry shutdown progress to the master:
 **SIGINT defer window:** `signal.signal(SIGINT, SIG_IGN)` at child process entry closes the narrow race between fork and `loop.add_signal_handler(SIGINT, ...)`. The event loop handler overrides it immediately on entry to `asyncio.run()`.
 
 See `interface_spec.md` §3 Shutdown sequence for the full protocol diagram.
+
+## Idle Phase: ONNX Off During Cognitive Loop (2026-04-03)
+
+**Status: implemented and confirmed (2026-04-03, commit 140c9bd).**
+
+The master previously sent `SET_WAKE_LISTEN` before entering the cognitive loop, causing OWW to run at full rate (~1 predict per 80ms, each 22–32ms) for the entire ~10s Claude window. Any wake detection during this window is discarded anyway (`processing=True` guard in master). This was pure CPU load with no benefit.
+
+**Fix:** New `"idle"` RecorderState phase — stream active, ring buffer writes active, both OWW and Silero gated off. Duty cycle drops to baseline (~1.5ms mean, ~3ms max) during the cognitive loop.
+
+**Phase flow:**
+```
+wake_listen → (WAKE_DETECTED) → capture → (VAD_STOPPED) → idle → (cognitive loop complete) → wake_listen
+```
+
+**Protocol:** Master sends `SET_IDLE` immediately on `VAD_STOPPED` (before reading ring buffer or starting STT). Master sends `SET_WAKE_LISTEN` in a `finally` block after `cognitive_loop()` returns — ensures transition happens even on exception.
+
+**Gating mechanism:** No new processor logic required. OWW already gates on `state.wake_listen` (False during idle). Silero already gates on `state.capture` (False during idle). AudioFrameWriter already gates on `not state.dormant` (idle is not dormant — writes continue).
+
+**Confirmed (2026-04-03):** Cognitive loop duty cycle max: 3.0ms (vs 49.6ms before).
+
+## OWW Predict Timing — Characterisation (2026-04-03)
+
+**Measured with periodic predict window logging (`[OWW/N]`) introduced 2026-04-03.**
+
+On Pi 4 Cortex-A72 with SCHED_FIFO priority 50, OWW predict via `asyncio.to_thread`:
+
+| Window | Calls | Mean | p95 | Max |
+|--------|-------|------|-----|-----|
+| OWW/25 | 25 | 22.1ms | 22.8ms | 27.7ms |
+| OWW/50 | 25 | 23.5ms | 24.7ms | 25.0ms |
+| OWW/75 | 25 | 22.3ms | 23.2ms | 23.5ms |
+| OWW/100| 25 | 25.3ms | 30.7ms | 35.4ms |
+| OWW/125| 25 | 26.8ms | 27.8ms | 28.2ms |
+| OWW/150| 25 | 29.0ms | 30.0ms | 30.2ms |
+| OWW/175| 25 | 31.9ms | 32.7ms | 39.8ms |
+
+Each call processes one 1280-sample (80ms) chunk. Calls fire every 4 audio frames.
+
+**Upward trend:** Mean increases from 22ms to 32ms (+45%) over ~30 seconds. Likely thermal throttling (Pi 4 reduces from 1.5GHz to 1.0GHz as temperature rises). At 32ms mean, there is 48ms headroom before the next predict is awaited — still safe, but narrowing. If trend continues to ~80ms mean, the `await self._pending_predict` in `process_frame` would start blocking the pipeline.
+
+**Observation:** predict runs consistently above the 20ms frame budget, but the pipeline tolerates this because predict fires only every 4 frames (80ms interval). The frame budget alarm is not triggered because duty cycle (bookend measurement) correctly shows low utilization — the `to_thread` offloads the cost off the event loop.
 
 ## Why Recorder Is Capture-Only
 
