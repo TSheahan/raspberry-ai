@@ -190,6 +190,10 @@ def main() -> None:
                 if alarming:
                     last_alarm_mono = mono
                     alarm_log.write(f"{utc_now()}  [A] {line}\n")
+                    # fsync after every alarm write so the line reaches disk
+                    # before the crash that may follow within milliseconds.
+                    alarm_log.flush()
+                    os.fsync(alarm_log.fileno())
                     print(f"[A] {line}", flush=True)
 
                     if evidence_file is None:
