@@ -22,7 +22,9 @@ Usage (on Pi with ReSpeaker):
     python src/master.py
 """
 
+import datetime
 import os
+import struct
 import subprocess
 import sys
 import tempfile
@@ -37,6 +39,12 @@ from dotenv import load_dotenv
 load_dotenv(override=True)
 
 from deepgram import DeepgramClient
+
+# Set SAVE_CAPTURE_WAV=1 to write each ring-buffer span to disk before STT.
+# Files land in archive/wav_scratch/ with a timestamp prefix.
+# Lets you inspect captured audio independently of the Deepgram call.
+SAVE_CAPTURE_WAV = os.environ.get("SAVE_CAPTURE_WAV", "0") == "1"
+_WAV_SCRATCH_DIR = os.path.join(os.path.dirname(__file__), "..", "archive", "wav_scratch")
 
 from recorder_child import recorder_child_entry
 from ring_buffer import (
@@ -82,12 +90,41 @@ def transcribe(audio_bytes: bytes, dg_client: DeepgramClient) -> str:
                 smart_format=True,
                 language="en",
             )
-        return response.results.channels[0].alternatives[0].transcript.strip()
+        try:
+            transcript = response.results.channels[0].alternatives[0].transcript.strip()
+        except (AttributeError, IndexError, TypeError) as e:
+            print(f"  [dg] response structure unexpected: {e}")
+            print(f"  [dg] raw response: {response}")
+            return ""
+        if not transcript:
+            print(f"  [dg] response ok but transcript is empty "
+                  f"(confidence="
+                  f"{response.results.channels[0].alternatives[0].confidence:.3f})")
+        return transcript
     except Exception as e:
         print(f"  Deepgram error: {e}")
         return ""
     finally:
         os.unlink(tmp_path)
+
+
+# ---------------------------------------------------------------------------
+# WAV debug save — preserves each captured span for offline inspection
+# ---------------------------------------------------------------------------
+
+def _save_wav_debug(audio_bytes: bytes) -> None:
+    """Write audio_bytes to a timestamped WAV file when SAVE_CAPTURE_WAV=1."""
+    if not SAVE_CAPTURE_WAV:
+        return
+    os.makedirs(_WAV_SCRATCH_DIR, exist_ok=True)
+    ts = datetime.datetime.now().strftime("%Y-%m-%dT%H%M%S")
+    path = os.path.join(_WAV_SCRATCH_DIR, f"{ts}_capture.wav")
+    with wave.open(path, "wb") as wf:
+        wf.setnchannels(CHANNELS)
+        wf.setsampwidth(SAMPLE_WIDTH)
+        wf.setframerate(SAMPLE_RATE)
+        wf.writeframes(audio_bytes)
+    print(f"  [wav] saved → {path}")
 
 
 # ---------------------------------------------------------------------------
@@ -97,6 +134,7 @@ def transcribe(audio_bytes: bytes, dg_client: DeepgramClient) -> str:
 def cognitive_loop(audio_bytes: bytes, dg_client: DeepgramClient) -> None:
     duration = len(audio_bytes) / (SAMPLE_RATE * SAMPLE_WIDTH)
     print(f"  Captured {duration:.1f}s of audio")
+    _save_wav_debug(audio_bytes)
     loop_start = time.time()
 
     transcript = transcribe(audio_bytes, dg_client)
@@ -179,8 +217,29 @@ def master_loop(pipe, shm: SharedMemory, child: Process) -> None:
         elif cmd == "VAD_STOPPED":
             end_pos = msg["write_pos"]
             start = vad_start_pos or wake_pos
-            audio_bytes = ring_reader.read(start, end_pos)
+            span = end_pos - start
+            dur_s = span / (SAMPLE_RATE * SAMPLE_WIDTH)
+            live_wp = ring_reader.write_pos
+            stale = ring_reader.is_stale(start)
             print(f"[master] VAD_STOPPED    write_pos={end_pos}")
+            print(f"  [ring] span: start={start}  end={end_pos}  "
+                  f"bytes={span}  dur={dur_s:.2f}s")
+            print(f"  [ring] live write_pos={live_wp}  stale={stale}")
+
+            audio_bytes = ring_reader.read(start, end_pos)
+
+            if not audio_bytes:
+                print(f"  [ring] read returned empty  (span={span}  stale={stale})")
+            else:
+                n_samples = len(audio_bytes) // SAMPLE_WIDTH
+                samples = struct.unpack_from(f'<{n_samples}h', audio_bytes)
+                zero_samples = samples.count(0)
+                rms = (sum(s * s for s in samples) / n_samples) ** 0.5
+                head = samples[:8]
+                tail = samples[-4:]
+                print(f"  [ring] read ok: {len(audio_bytes)} bytes  "
+                      f"{n_samples} samples  zeros={zero_samples}  rms={rms:.1f}")
+                print(f"  [ring] head={head}  tail={tail}")
 
             pipe.send({"cmd": "SET_WAKE_LISTEN"})
             processing = True

@@ -22,6 +22,7 @@ import asyncio
 import math
 import os
 import signal
+import struct
 import time
 
 import numpy as np
@@ -530,16 +531,46 @@ class AudioFrameWriter(FrameProcessor):
 
     Delegates to state.write_audio(), which performs the SharedMemory
     memcpy and advances write_pos. Skips writes in DORMANT phase.
+
+    Instrumentation: logs on the first frame of each phase, then every
+    _LOG_INTERVAL frames, printing write_pos and 4 raw PCM samples so
+    zeros (silent/missing audio) are immediately visible in output.
+    Also logs a phase-boundary summary when the phase transitions.
     """
+
+    _LOG_INTERVAL = 50   # ~1 s at 20 ms/frame
 
     def __init__(self, state: RecorderState):
         super().__init__()
         self.state = state
+        self._frames_written: int = 0   # total across all phases
+        self._phase_frames: int = 0     # resets on each phase change
+        self._last_phase: str = ""
 
     async def process_frame(self, frame: Frame, direction):
         await super().process_frame(frame, direction)
         if isinstance(frame, AudioRawFrame) and not self.state.dormant:
+            phase = self.state.phase
+
+            if phase != self._last_phase:
+                if self._last_phase:
+                    print(f"  [ring/write] phase {self._last_phase}→{phase}: "
+                          f"wrote {self._phase_frames} frames, "
+                          f"write_pos={self.state.write_pos}")
+                self._phase_frames = 0
+                self._last_phase = phase
+
             self.state.write_audio(frame.audio)
+            self._frames_written += 1
+            self._phase_frames += 1
+
+            if self._phase_frames == 1 or self._phase_frames % self._LOG_INTERVAL == 0:
+                wp = self.state.write_pos
+                head = struct.unpack_from('<4h', frame.audio)
+                print(f"  [ring/write] phase={phase} "
+                      f"frame={self._phase_frames} write_pos={wp} "
+                      f"sample[0:4]={head}")
+
         await self.push_frame(frame, direction)
 
 

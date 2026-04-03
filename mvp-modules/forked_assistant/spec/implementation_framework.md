@@ -223,6 +223,8 @@ STT uses `DeepgramClient.listen.rest.v("1").transcribe_file()` (file-based batch
   - Confirm the ring buffer read is producing valid audio (not zeros, not truncated)
 - Implement as a thin wrapper in `cognitive_loop()` — one `wave.open()` write after `ring_reader.read()`, before `transcribe()` is called. Zero impact on normal operation when disabled.
 
+**TODO — logging uplift:** All diagnostic output in `recorder_child.py`, `master.py`, and `recorder_state.py` currently uses bare `print()`. This is sufficient for early debugging but should be replaced with structured `logging` calls (using a per-module logger, configurable level, and consistent format) before the system is considered production-ready. The uplift should cover: child-side ring/write and duty-cycle lines, state transition lines, master-side ring diagnostics and cognitive-loop timing lines, and the queue-depth alarm output. No functional change — purely a logging hygiene pass. Track as a post-EU-4-validation cleanup task.
+
 **Estimated scope:** ~120 lines. One session, assuming EU-3 is proven.
 
 ---
