@@ -9,10 +9,11 @@ master process.
 Combines Track 1's real downstream port (ring buffer + pipe signals) with
 Track 2's real Pipecat pipeline (GatedVADProcessor, OpenWakeWordProcessor).
 
-Duty cycle instrumentation (ENABLE_DUTY_CYCLE=1):
+Duty cycle instrumentation (LOG_LEVEL=PERF or TRACE):
   Bookend processors measure end-to-end pipeline traversal time per audio
-  frame. Composed into the pipeline only when enabled; zero overhead otherwise.
-  Per-phase histogram, arrival cadence, and OWW predict summary at exit.
+  frame. Composed into the pipeline only when the root logger level is at or
+  below PERF (8). Zero overhead otherwise. Per-phase histogram, arrival
+  cadence, and OWW predict summary at exit.
 
 Entry point: recorder_child_entry(pipe, shm_name) — used as
 multiprocessing.Process target by the master.
@@ -30,7 +31,7 @@ import numpy as np
 from collections import defaultdict, deque
 from multiprocessing.shared_memory import SharedMemory
 
-from log_config import configure_logging, TRACE
+from log_config import configure_logging, PERF, TRACE
 
 logger = logging.getLogger("recorder_child")
 
@@ -53,7 +54,13 @@ from pipecat.audio.vad.vad_controller import VADController
 from recorder_state import RecorderState
 from ring_buffer import RingBufferWriter
 
-ENABLE_DUTY_CYCLE = os.environ.get("ENABLE_DUTY_CYCLE", "0") == "1"
+def _duty_cycle_enabled() -> bool:
+    """True when the root logger level is at or below PERF (8).
+
+    Checked once during child process setup, after configure_logging() has run.
+    Avoids an env-var dependency — LOG_LEVEL is the single verbosity control.
+    """
+    return logging.getLogger().isEnabledFor(PERF)
 
 
 # ---------------------------------------------------------------------------
@@ -78,7 +85,7 @@ class QueueDepthMonitor:
     Reads transport_input._audio_in_queue.qsize() once per audio frame.
     Prints an immediate alarm when depth exceeds ALARM_THRESHOLD.
     Designed to be called from exactly one pipeline processor per frame
-    (DutyCycleEntry when ENABLE_DUTY_CYCLE=1, GatedVADProcessor otherwise).
+    (DutyCycleEntry when duty cycle is enabled, GatedVADProcessor otherwise).
     """
 
     ALARM_THRESHOLD = 2
@@ -208,7 +215,7 @@ class DutyCycleCollector:
         if self._window_max_qdepth >= 0:
             qdepth_str = f"  q_max={self._window_max_qdepth}"
 
-        logger.log(TRACE, "[DUTY/%d] %s: mean=%.1fms p95=%.1fms max=%.1fms util=%.0f%%%s%s",
+        logger.log(PERF, "[DUTY/%d] %s: mean=%.1fms p95=%.1fms max=%.1fms util=%.0f%%%s%s",
                    self._total_frames, phase_lbl, mean, p95, mx, util,
                    arrival_str, qdepth_str)
 
@@ -622,19 +629,21 @@ async def recorder_child_main(pipe, shm_name: str) -> None:
 
         qdepth_monitor = QueueDepthMonitor(transport_input=input_transport)
 
+        duty_cycle_on = _duty_cycle_enabled()
+
         vad_processor = GatedVADProcessor(
             vad_analyzer=SileroVADAnalyzer(
                 params=VADParams(stop_secs=1.8, start_secs=0.2),
             ),
             state=state,
-            monitor=qdepth_monitor if not ENABLE_DUTY_CYCLE else None,
+            monitor=qdepth_monitor if not duty_cycle_on else None,
         )
 
         wake_processor = OpenWakeWordProcessor(state=state)
         audio_writer = AudioFrameWriter(state=state)
 
         duty_collector = None
-        if ENABLE_DUTY_CYCLE:
+        if duty_cycle_on:
             duty_collector = DutyCycleCollector(
                 state=state, monitor=qdepth_monitor, transport_input=input_transport,
             )

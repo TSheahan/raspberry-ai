@@ -12,15 +12,23 @@ Usage:
     logger = logging.getLogger("my_module")
     logger.log(TRACE, "per-frame detail: %s", value)
 
-LOG_LEVEL env var controls the root level. Accepts: TRACE, DEBUG, INFO,
-WARNING, ERROR. Default: INFO.
+LOG_LEVEL env var controls the root level. Accepts: TRACE, PERF, DEBUG,
+INFO, WARNING, ERROR. Default: INFO.
+
+  TRACE (5)  — per-frame ring writes, OWW chunk clears, duty cycle windows
+  PERF  (8)  — duty cycle bookend processors composed into pipeline;
+               periodic window reports emitted; all DEBUG messages visible
+  DEBUG (10) — state transitions, stream ops, OWW/Silero resets, ring detail
+  INFO  (20) — wake/VAD events, transcripts, latencies, shutdown summaries
 """
 
 import logging
 import os
 
 TRACE = 5
+PERF  = 8
 logging.addLevelName(TRACE, "TRACE")
+logging.addLevelName(PERF,  "PERF")
 
 
 def configure_logging(default_level: str = "INFO") -> None:
@@ -30,7 +38,8 @@ def configure_logging(default_level: str = "INFO") -> None:
     calls are made. Uses force=True so re-configuration in tests is safe.
     """
     level_name = os.environ.get("LOG_LEVEL", default_level).upper()
-    level = TRACE if level_name == "TRACE" else getattr(logging, level_name, logging.INFO)
+    _custom = {"TRACE": TRACE, "PERF": PERF}
+    level = _custom.get(level_name, getattr(logging, level_name, logging.INFO))
     logging.basicConfig(
         level=level,
         format="%(asctime)s.%(msecs)03d %(levelname)-5s %(name)s: %(message)s",
