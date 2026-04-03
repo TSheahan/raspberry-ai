@@ -72,16 +72,57 @@ Root Cause 4's fix ensures `stop_stream()` precedes `task.cancel()`. This is nec
 
 **Additional hazard — triple `stop_stream()`:** Even if the first call survives, Pipecat's teardown calls `stop_stream()` up to three times: (1) `_stop_stream()` in `set_phase("dormant")`, (2) `cancel_with_stream_stop` during `task.cancel()`, (3) `LocalAudioInputTransport.cleanup()` after CancelFrame exits the pipeline. Each call independently risks the USB fault.
 
-**Fix — callback self-termination via `paComplete` (2026-04-03):** Never call `Pa_StopStream()` from outside the callback thread. Instead, monkey-patch the PyAudio callback at pipeline setup time to check a `_stop_producing` flag. When the flag is set, the callback returns `(None, pyaudio.paComplete)` instead of `(None, pyaudio.paContinue)`. PortAudio stops the stream internally from within the callback thread — no cross-thread `snd_pcm_drop()` race.
+**Extended hazard — Pa_CloseStream and Pa_Terminate (2026-04-03, run 6):**
+The paComplete fix confirmed: `[state] stream stopped via paComplete` appeared, `is_active()` returned False. But the crash then moved to `task.cancel()` → pipeline teardown → `LocalAudioInputTransport.cleanup()` → `stream.close()` → `Pa_CloseStream()`. Same xHCI race, different entry point. Additionally, Python's GC calls `PyAudio.__del__` → `pa_terminate()` → `Pa_Terminate()` which closes all open C-level stream handles on process exit — same fault vector even if Python `close()` is skipped.
+
+**Complete fix — eliminate all three USB interaction points (2026-04-03):**
 
 ```
 1. recorder_child_main: monkey-patch _audio_in_callback with guarded wrapper
-2. _stop_stream: set _stop_producing = True, await 100ms settle
-3. cancel monkey-patch: check _stop_producing (idempotent), await 100ms
-4. cleanup monkey-patch: skip stop_stream(), just close()
+   — _stop_producing = False initially; True signals the callback to return paComplete
+2. _stop_stream: set _stop_producing = True, await 100ms, inspect is_active()
+   — no Pa_StopStream call
+3. cancel monkey-patch: idempotent flag check — no Pa_StopStream call
+4. cleanup monkey-patch: _in_stream = None only — no Pa_CloseStream call
+5. recorder_child_entry: os._exit(0) after asyncio.run
+   — bypasses Python destructor cleanup, preventing Pa_Terminate from closing
+     the C-level stream handle during GC
 ```
 
-All three `stop_stream()` call sites are eliminated. The only stream-stop mechanism is the callback returning `paComplete`.
+`os._exit(0)` fires after all Python-level shutdown work completes inside `asyncio.run` (QDEPTH summary, SHUTDOWN_FINISHED, `shm.close()`). The kernel releases the USB device during process teardown — the most stable path available.
+
+**Confirmed diagnostic (run 6):** `[state] stream stopped via paComplete` — paComplete worked, is_active() False, 100ms was sufficient. Crash moved to stream.close(). Second commit eliminated close() and added os._exit(0).
+
+**Expected clean shutdown log sequence:**
+```
+[state] signaling callback paComplete...
+[state] stream stopped via paComplete
+[child] callback already signaled before cancel
+[child] cleanup: skipped stream close (kernel will release)
+[QDEPTH] max_depth_seen=...  total_alarms=...
+(DUTY CYCLE SUMMARY if LOG_LEVEL=PERF)
+[child] SHUTDOWN_FINISHED sent
+[child] exiting
+[master] done
+$
+```
+
+## Monkey-Patch Pattern for Pipecat Transport
+
+When Pipecat's transport behaviour must be changed without forking the package, monkey-patch at the instance level inside `recorder_child_main()`, before the pipeline is built. This scopes changes to one process run and leaves the installed package untouched.
+
+```python
+# Pattern: save original, wrap, reassign on instance
+original = obj.method
+def replacement(args):
+    # different behaviour
+    return original(args)   # optionally call through
+obj.method = replacement
+```
+
+**Timing invariant:** patches must be applied after `transport.input()` returns the `LocalAudioInputTransport` instance, but before `Pipeline(processors)` and `runner.run(task)` — the latter triggers `StartFrame` which opens the PyAudio stream and registers the C-level callback pointer. The callback patch must be in place before the stream opens.
+
+**Instance vs class scope:** `obj.method = f` only affects that object. `ClassName.method = f` would affect all instances in the process. Always patch the instance.
 
 ## OWW State Reset Protocol
 
@@ -103,5 +144,7 @@ Implementation: `asyncio.create_task()` the reset-then-resume sequence, never sy
 | Manual `transport.cleanup()` in `finally` blocks | Double-cleanup races with Pipecat teardown |
 | SIGINT handler calling `task.cancel()` directly | Skips stream-stop ordering → same USB race as Root Cause 3/4 |
 | Calling `Pa_StopStream()`/`stop_stream()` from non-callback thread | USB fault on Pi 4 xHCI → kernel reset → reboot (Root Cause 5) |
+| Calling `Pa_CloseStream()`/`stream.close()` after stream stopped | Same xHCI race as stop_stream — crash moved here after paComplete fix |
+| Relying on Python GC / `PyAudio.__del__` for stream teardown | `Pa_Terminate()` closes C-level handle → same USB fault on process exit |
 | `np.append` in any frame-processing hot path | O(n) copy → ALSA underrun → USB hang → reboot |
 | Unbounded queue without backpressure | Silent frame accumulation until cascade |
