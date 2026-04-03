@@ -683,20 +683,20 @@ async def recorder_child_main(pipe, shm_name: str) -> None:
 
         input_transport.cancel = cancel_with_flag_stop
 
-        # --- Monkey-patch cleanup() to skip stop_stream() entirely ---
+        # --- Monkey-patch cleanup() to skip stop_stream() AND close() ---
         # Pipecat's LocalAudioInputTransport.cleanup() calls stop_stream() then
-        # close(). We bypass stop_stream (handled by paComplete) and just close.
+        # close(). Both Pa_StopStream and Pa_CloseStream interact with the USB
+        # subsystem and can trigger the xHCI fault on Pi 4 (Root Cause 5).
+        # We skip both: the stream was already stopped via paComplete, and the
+        # kernel will release the USB device when the child process exits.
         from pipecat.processors.frame_processor import FrameProcessor as _FP
 
         async def _safe_cleanup():
             await _FP.cleanup(input_transport)
-            stream = input_transport._in_stream
-            if stream:
-                try:
-                    stream.close()
-                except Exception as e:
-                    logger.debug("[child] stream.close exception: %s", e)
-                input_transport._in_stream = None
+            # Null out _in_stream so nothing else tries to touch it.
+            # Don't call close() — let kernel process-exit cleanup handle USB.
+            input_transport._in_stream = None
+            logger.debug("[child] cleanup: skipped stream close (kernel will release)")
 
         input_transport.cleanup = _safe_cleanup
 
@@ -790,8 +790,16 @@ def recorder_child_entry(pipe, shm_name: str) -> None:
     SIGINT is deferred (SIG_IGN) until the asyncio event loop installs its
     own handler via add_signal_handler. This prevents a narrow race where
     ^C arrives between process start and handler registration.
+
+    os._exit(0) after asyncio.run prevents Python's destructor cleanup from
+    calling PyAudio.terminate() → Pa_Terminate(), which closes all open
+    PortAudio streams at the C level — triggering the same xHCI USB fault
+    as Pa_StopStream/Pa_CloseStream (Root Cause 5).  All Python-level
+    shutdown work (QDEPTH summary, SHUTDOWN_FINISHED, shm.close) completes
+    inside asyncio.run before os._exit fires.
     """
     signal.signal(signal.SIGINT, signal.SIG_IGN)
     configure_logging()
     os.sched_setaffinity(0, {0})
     asyncio.run(recorder_child_main(pipe, shm_name))
+    os._exit(0)

@@ -218,7 +218,11 @@ class RecorderState:
             logger.debug("[state] signaling callback paComplete...")
             t._stop_producing = True
             await asyncio.sleep(0.1)
-            logger.debug("[state] stream stopped via paComplete")
+            stream = getattr(t, '_in_stream', None)
+            if stream and stream.is_active():
+                logger.warning("[state] stream still active after 100ms settle — paComplete may not have fired")
+            else:
+                logger.debug("[state] stream stopped via paComplete")
         elif t and hasattr(t, '_in_stream') and t._in_stream:
             logger.warning("[state] no _stop_producing flag — falling back to stop_stream()")
             t._in_stream.stop_stream()
