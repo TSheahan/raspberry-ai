@@ -75,6 +75,17 @@ def run_claude(transcript: str) -> str:
     return result.stdout.strip()
 
 
+def stub_claude(transcript: str) -> str:
+    """Token-free Claude stand-in. Burns ~3s of CPU to mimic inference load."""
+    logger.info("[stub_claude] simulating Claude load for transcript: %r", transcript)
+    end = time.time() + 3.0
+    x = 1.0
+    while time.time() < end:
+        for _ in range(10_000):
+            x = (x * 1.0000001 + 0.0000001) % 1e9
+    return f"[stub] received: {transcript!r}"
+
+
 # ---------------------------------------------------------------------------
 # STT — Deepgram file-based (batch) transcription
 # ---------------------------------------------------------------------------
@@ -161,7 +172,7 @@ def cognitive_loop(audio_bytes: bytes, dg_client: DeepgramClient) -> None:
     logger.info("STT latency: %.2fs", stt_elapsed)
 
     claude_start = time.time()
-    response = run_claude(transcript)
+    response = stub_claude(transcript)  # TODO: swap back to run_claude (token budget, ~2026-04-07)
     claude_elapsed = time.time() - claude_start
 
     logger.info("CLAUDE RESPONSE:\n%s", response)
