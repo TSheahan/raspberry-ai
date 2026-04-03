@@ -41,10 +41,12 @@ load_dotenv(override=True)
 from deepgram import DeepgramClient
 
 # Set SAVE_CAPTURE_WAV=1 to write each ring-buffer span to disk before STT.
-# Files land in archive/wav_scratch/ with a timestamp prefix.
+# WAV_SCRATCH_DIR controls the destination (default: ~/raspberry-ai/scratch/executions/).
 # Lets you inspect captured audio independently of the Deepgram call.
 SAVE_CAPTURE_WAV = os.environ.get("SAVE_CAPTURE_WAV", "0") == "1"
-_WAV_SCRATCH_DIR = os.path.join(os.path.dirname(__file__), "..", "archive", "wav_scratch")
+_WAV_SCRATCH_DIR = os.path.expanduser(
+    os.environ.get("WAV_SCRATCH_DIR", "~/raspberry-ai/scratch/executions")
+)
 
 from recorder_child import recorder_child_entry
 from ring_buffer import (
@@ -216,14 +218,22 @@ def master_loop(pipe, shm: SharedMemory, child: Process) -> None:
 
         elif cmd == "VAD_STOPPED":
             end_pos = msg["write_pos"]
-            start = vad_start_pos or wake_pos
+            # Always read from wake_pos — captures the full utterance including
+            # pre-speech audio that precedes the Silero onset delay (~0.2s
+            # start_secs plus processing). vad_start_pos is logged as advisory
+            # so the onset gap is visible, but it is not used as the span start.
+            start = wake_pos
             span = end_pos - start
             dur_s = span / (SAMPLE_RATE * SAMPLE_WIDTH)
             live_wp = ring_reader.write_pos
             stale = ring_reader.is_stale(start)
+            vad_gap = vad_start_pos - wake_pos if vad_start_pos else 0
+            vad_gap_s = vad_gap / (SAMPLE_RATE * SAMPLE_WIDTH)
             print(f"[master] VAD_STOPPED    write_pos={end_pos}")
-            print(f"  [ring] span: start={start}  end={end_pos}  "
+            print(f"  [ring] span: start={start}(wake)  end={end_pos}  "
                   f"bytes={span}  dur={dur_s:.2f}s")
+            print(f"  [ring] vad_start={vad_start_pos}  "
+                  f"vad_gap={vad_gap}b ({vad_gap_s:.2f}s pre-speech dropped previously)")
             print(f"  [ring] live write_pos={live_wp}  stale={stale}")
 
             audio_bytes = ring_reader.read(start, end_pos)

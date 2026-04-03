@@ -158,6 +158,18 @@ The dispatch overhead (~4ms) is irrelevant — predict is now off the critical p
 
 **Instrumentation puzzle resolved (2026-04-02).** The "2× predict count as >20ms frames" observation (223 >20ms frames vs 112 predict calls in the before data) is now explained: a synchronous predict blocking the event loop for ~24ms caused *both* the predict frame and the subsequent frame to measure >20ms in the bookend timing (the next frame's entry stamp was delayed by the blocked loop). With predict async, the subsequent frame sees the event loop immediately available — both frames measure <5ms. The 2× multiplier was direct event loop contention, not a queue dwell artifact.
 
+## Capture Span Start: Wake Position, Not VAD Start (2026-04-03)
+
+**Finding:** Using `VAD_STARTED write_pos` as the ring buffer span start discards the utterance onset — typically 1–2 seconds of audio including the opening word(s) of the query.
+
+**Root cause:** Silero VAD's `start_secs=0.2` parameter requires 0.2s of sustained speech energy before the onset event fires. Combined with pipeline processing latency, the `VAD_STARTED` signal arrives ~66 frames (1.32s) into the capture phase. Any audio written to the ring between wake detection and `VAD_STARTED` is never read. In the confirming run (2026-04-03), a one-word utterance ("hello") was completely truncated — only the trailing vowel fragment and trailing silence reached Deepgram, returning confidence=0.000 and an empty transcript.
+
+**Fix:** Always read the ring from `wake_pos` (the `write_pos` at the moment of `WAKE_DETECTED`) to `end_pos` (the `write_pos` at `VAD_STOPPED`). This captures the full utterance including any pre-speech audio. `VAD_STARTED` is retained as an advisory signal — logged as `vad_gap` to make onset latency visible — but not used to trim the span start.
+
+**Forward design constraint:** VAD signals are advisory, not authoritative for span boundaries. Audio capture commences unconditionally on wake detection and ends on `VAD_STOPPED`. Future dictation mode will extend this further: the span end will also become advisory (configurable policy: VAD_STOPPED after N seconds, explicit command, or timeout) to support extended capture without the 1.8s `stop_secs` cutoff.
+
+**Confirmed ring buffer health (same run):** `rms=168.6`, `zeros=0`, `stale=False` — the buffer writes and reads are mechanically correct. The truncation was purely a span-selection bug, not a buffer or transport issue.
+
 ## Why Recorder Is Capture-Only
 
 The recorder child owns the microphone and nothing else. Playback (TTS) belongs to the master or a future separate process. This keeps the child simple and aligned with the ReSpeaker hat's input-focused design. It also avoids bidirectional audio I/O races in the same process.
