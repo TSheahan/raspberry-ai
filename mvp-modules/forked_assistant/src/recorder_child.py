@@ -78,6 +78,7 @@ def _duty_cycle_enabled() -> bool:
 DUTY_CYCLE_WINDOW  = 100
 FRAME_DURATION_MS  = 20.0
 HISTOGRAM_EDGES_MS = (0, 5, 10, 15, 20)
+PREDICT_REPORT_INTERVAL = 25
 
 
 class QueueDepthMonitor:
@@ -228,7 +229,7 @@ class DutyCycleCollector:
     def print_final_summary(self, wake_processor=None) -> None:
         lines = ["\n" + "=" * 64, "DUTY CYCLE SUMMARY", "=" * 64]
 
-        for phase in ("wake_listen", "capture", "dormant"):
+        for phase in ("wake_listen", "capture", "idle", "dormant"):
             samples = self._phase_samples.get(phase)
             if not samples:
                 continue
@@ -273,7 +274,7 @@ class DutyCycleCollector:
 
         if self._phase_arrivals:
             lines.append("\n  Arrival cadence (inter-frame intervals):")
-            for phase in ("wake_listen", "capture", "dormant"):
+            for phase in ("wake_listen", "capture", "idle", "dormant"):
                 arrivals = self._phase_arrivals.get(phase)
                 if not arrivals:
                     continue
@@ -455,6 +456,7 @@ class OpenWakeWordProcessor(FrameProcessor):
         self._predict_times: deque[float] = deque(maxlen=500)
         self._predict_count: int = 0
         self._frames_in_wake: int = 0
+        self._window_predict_times: list[float] = []
         self._pending_predict: asyncio.Task | None = None
         logger.info("openwakeword ready")
 
@@ -497,8 +499,12 @@ class OpenWakeWordProcessor(FrameProcessor):
                 return
             t_pred = time.perf_counter()
             predictions = await asyncio.to_thread(self.model.predict, chunk)
-            self._predict_times.append((time.perf_counter() - t_pred) * 1000.0)
+            elapsed_ms = (time.perf_counter() - t_pred) * 1000.0
+            self._predict_times.append(elapsed_ms)
             self._predict_count += 1
+            self._window_predict_times.append(elapsed_ms)
+            if len(self._window_predict_times) >= PREDICT_REPORT_INTERVAL:
+                self._emit_predict_window()
             if not self.state.wake_listen:
                 return
             current_time = time.time()
@@ -510,6 +516,16 @@ class OpenWakeWordProcessor(FrameProcessor):
                     logger.info("WAKE DETECTED -- '%s'  |  score: %.3f", wakeword, score)
                     self.last_detection_time = current_time
                     self.state.signal_wake_detected(score, wakeword)
+
+    def _emit_predict_window(self) -> None:
+        s = sorted(self._window_predict_times)
+        n = len(s)
+        mean = sum(s) / n
+        p95 = DutyCycleCollector._percentile(s, 0.95)
+        mx = s[-1]
+        logger.log(PERF, "[OWW/%d] predict: n=%d mean=%.1fms p95=%.1fms max=%.1fms",
+                   self._predict_count, n, mean, p95, mx)
+        self._window_predict_times.clear()
 
     def predict_summary(self) -> str:
         if not self._predict_count:
@@ -601,6 +617,8 @@ async def command_listener(state: RecorderChild, pipe, initiate_shutdown) -> Non
                 await state.set_phase("capture")
             elif cmd == "SET_DORMANT":
                 await state.set_phase("dormant")
+            elif cmd == "SET_IDLE":
+                await state.set_phase("idle")
             elif cmd == "SHUTDOWN":
                 logger.info("[child] SHUTDOWN command received")
                 await initiate_shutdown()
@@ -785,7 +803,10 @@ async def recorder_child_main(pipe, shm_name: str) -> None:
 # ---------------------------------------------------------------------------
 
 def recorder_child_entry(pipe, shm_name: str) -> None:
-    """Pin to core 0, then run the async recorder child main loop.
+    """Pin to core 0, elevate scheduling priority, then run the async main loop.
+
+    Scheduling: SCHED_FIFO (real-time) if permitted, otherwise nice -10.
+    Ensures the audio pipeline preempts normal processes on core 0.
 
     SIGINT is deferred (SIG_IGN) until the asyncio event loop installs its
     own handler via add_signal_handler. This prevents a narrow race where
@@ -801,5 +822,14 @@ def recorder_child_entry(pipe, shm_name: str) -> None:
     signal.signal(signal.SIGINT, signal.SIG_IGN)
     configure_logging()
     os.sched_setaffinity(0, {0})
+    try:
+        os.sched_setscheduler(0, os.SCHED_FIFO, os.sched_param(50))
+        logger.info("[child] SCHED_FIFO priority 50")
+    except PermissionError:
+        try:
+            os.nice(-10)
+            logger.info("[child] nice -10 (SCHED_FIFO unavailable)")
+        except PermissionError:
+            logger.warning("[child] could not elevate priority")
     asyncio.run(recorder_child_main(pipe, shm_name))
     os._exit(0)

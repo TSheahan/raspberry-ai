@@ -53,7 +53,7 @@ class RecorderState:
             pipe: multiprocessing.Connection to master, or None (stub-safe).
             shm:  multiprocessing.shared_memory.SharedMemory, or None.
         """
-        self._phase             = "dormant"   # "dormant" | "wake_listen" | "capture"
+        self._phase             = "dormant"   # "dormant" | "wake_listen" | "capture" | "idle"
         self._write_pos         = 0           # monotonic byte offset; updated by write_audio()
         self._vad_frame_count   = 0           # frames fed to Silero this capture session
         self._total_frame_count = 0           # all audio frames since process start
@@ -101,6 +101,10 @@ class RecorderState:
     @property
     def capture(self) -> bool:
         return self._phase == "capture"
+
+    @property
+    def idle(self) -> bool:
+        return self._phase == "idle"
 
     @property
     def write_pos(self) -> int:

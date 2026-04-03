@@ -7,10 +7,10 @@ on core 0, then runs a synchronous event loop that:
   1. Waits for READY from the recorder child
   2. Sends SET_WAKE_LISTEN
   3. On WAKE_DETECTED: sends SET_CAPTURE
-  4. On VAD_STOPPED: reads the ring buffer span, transcribes via Deepgram,
-     sends to Claude, prints the response
-  5. On response complete: sends SET_WAKE_LISTEN (already sent before
-     the cognitive loop — recorder listens while master thinks)
+  4. On VAD_STOPPED: sends SET_IDLE (inference off, stream active), reads
+     the ring buffer span, transcribes via Deepgram, sends to Claude,
+     prints the response
+  5. On response complete: sends SET_WAKE_LISTEN
   6. Handles Ctrl+C → SHUTDOWN sequence
 
 Dependencies not in requirements.txt (already installed on Pi venv):
@@ -289,7 +289,7 @@ def master_loop(pipe, shm: SharedMemory, child: Process) -> None:
                              len(audio_bytes), n_samples, zero_samples, rms)
                 logger.log(TRACE, "[ring] head=%s  tail=%s", head, tail)
 
-            pipe.send({"cmd": "SET_WAKE_LISTEN"})
+            pipe.send({"cmd": "SET_IDLE"})
             processing = True
             try:
                 cognitive_loop(audio_bytes, dg_client)
@@ -297,6 +297,10 @@ def master_loop(pipe, shm: SharedMemory, child: Process) -> None:
                 logger.error("cognitive loop error: %s", e)
             finally:
                 processing = False
+                try:
+                    pipe.send({"cmd": "SET_WAKE_LISTEN"})
+                except (BrokenPipeError, OSError):
+                    pass
                 logger.info("listening for wake word...")
 
         elif cmd == "SHUTDOWN_COMMENCED":
