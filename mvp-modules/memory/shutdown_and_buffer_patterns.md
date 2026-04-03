@@ -60,6 +60,29 @@ The master waits for SHUTDOWN_FINISHED on all exit paths (KeyboardInterrupt, nor
 
 **Confirmed clean shutdown (2026-04-03, run 3):** QDEPTH summary printed, full duty cycle summary printed, SHUTDOWN_FINISHED received by master, clean shell prompt, no reboot.
 
+## Root Cause 5: `Pa_StopStream()` Cross-Thread USB Fault (Two-Process)
+
+Root Cause 4's fix ensures `stop_stream()` precedes `task.cancel()`. This is necessary but not sufficient. The `Pa_StopStream()` call itself — regardless of ordering — can trigger a USB subsystem fault on Pi 4 with ReSpeaker.
+
+**Mechanism:** `stop_stream()` calls PortAudio's `Pa_StopStream()` from the asyncio event loop thread. The PortAudio callback thread is actively servicing USB isochronous transfers. `Pa_StopStream()` calls `snd_pcm_drop()`, which cancels pending USB URBs. If a URB completion interrupt is in flight during cancellation, the xHCI driver on Pi 4 faults. The kernel resets the USB host controller, which cascades to a system reboot.
+
+**Symptom (2026-04-03, run 5):** Two-phase shutdown fires correctly — `_initiate_shutdown()` reaches `_stop_stream()` before `task.cancel()`. Log shows `[state] stream to stop..` but never `[state] stream stopped`. Pi reboots. Identical to Root Cause 4's symptom, but the ordering fix is in place.
+
+**Why intermittent:** Timing-dependent race between `Pa_StopStream()` thread and USB transfer completion interrupts. Clean in run 4 (12:25), crashed in run 5 (14:17) with identical code.
+
+**Additional hazard — triple `stop_stream()`:** Even if the first call survives, Pipecat's teardown calls `stop_stream()` up to three times: (1) `_stop_stream()` in `set_phase("dormant")`, (2) `cancel_with_stream_stop` during `task.cancel()`, (3) `LocalAudioInputTransport.cleanup()` after CancelFrame exits the pipeline. Each call independently risks the USB fault.
+
+**Fix — callback self-termination via `paComplete` (2026-04-03):** Never call `Pa_StopStream()` from outside the callback thread. Instead, monkey-patch the PyAudio callback at pipeline setup time to check a `_stop_producing` flag. When the flag is set, the callback returns `(None, pyaudio.paComplete)` instead of `(None, pyaudio.paContinue)`. PortAudio stops the stream internally from within the callback thread — no cross-thread `snd_pcm_drop()` race.
+
+```
+1. recorder_child_main: monkey-patch _audio_in_callback with guarded wrapper
+2. _stop_stream: set _stop_producing = True, await 100ms settle
+3. cancel monkey-patch: check _stop_producing (idempotent), await 100ms
+4. cleanup monkey-patch: skip stop_stream(), just close()
+```
+
+All three `stop_stream()` call sites are eliminated. The only stream-stop mechanism is the callback returning `paComplete`.
+
 ## OWW State Reset Protocol
 
 OpenWakeWord's preprocessor accumulates state in five internal buffers: `prediction_buffer`, `raw_data_buffer`, `melspectrogram_buffer`, `feature_buffer`, `accumulated_samples`. All must be reset on every ungating transition (e.g., CAPTURE→WAKE_LISTEN).
@@ -79,5 +102,6 @@ Implementation: `asyncio.create_task()` the reset-then-resume sequence, never sy
 | Calling `stop_stream()`/`start_stream()` synchronously from `process_frame` | PortAudio deadlock or USB fault |
 | Manual `transport.cleanup()` in `finally` blocks | Double-cleanup races with Pipecat teardown |
 | SIGINT handler calling `task.cancel()` directly | Skips stream-stop ordering → same USB race as Root Cause 3/4 |
+| Calling `Pa_StopStream()`/`stop_stream()` from non-callback thread | USB fault on Pi 4 xHCI → kernel reset → reboot (Root Cause 5) |
 | `np.append` in any frame-processing hot path | O(n) copy → ALSA underrun → USB hang → reboot |
 | Unbounded queue without backpressure | Silent frame accumulation until cascade |
