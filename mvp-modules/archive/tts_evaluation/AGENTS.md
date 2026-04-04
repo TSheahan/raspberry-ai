@@ -18,8 +18,9 @@ Either condition alone blocks delivery. Both must be resolved.
    the contract `master.py` depends on (already added — see interface section below)
 2. **Cloud implementation selected** — one backend written, tested standalone, proven in
    full integrated pipeline on Pi
-3. **`PiperTTS` archived** — retained in `tts.py` as reference but no longer active;
-   `master.py` instantiates the new backend
+3. **`PiperTTS` retired** — ported to `TTSBackend`, proven on Pi, synthesis stub left in
+   place; class remains in `tts.py` as the record of why Piper was rejected (OOM + audio
+   tearing); `master.py` instantiates the selected cloud backend
 4. **This folder** — effort log and per-candidate notes remain as the evaluation record
 
 `master.py` integration point: `tts.play(agent.run(transcript))` — no change to master.py
@@ -63,11 +64,21 @@ For cloud REST backends (no native streaming), the implementation pattern is:
 - **Char limit:** 2000 chars per request — sentence chunks are well within this
 - **Notes:** See `deepgram_tts_notes.md` for full API reference and voice controls
 
-### Cartesia (evaluate if Deepgram latency is marginal)
+### ElevenLabs (Phase 2a — evaluate first if Deepgram marginal; account already created)
+
+- **API:** streaming via `convert_as_stream()`; `pcm_24000` output (raw S16LE, 24kHz)
+- **SDK:** `pip install elevenlabs` — not yet in Pi venv
+- **Auth:** `ELEVENLABS_API_KEY` — account at elevenlabs.io; key under **Profile → API Keys** (`sk_...`)
+- **Model:** `eleven_flash_v2_5` — ~75ms first-chunk latency (documented)
+- **Encoding:** `pcm_24000` matches Deepgram sample rate — no PyAudio reconfiguration needed
+- **Latency advantage:** streaming; Flash v2.5 is the lowest-latency ElevenLabs model
+- **Notes:** `elevenlabs_notes.md` (populate after evaluation)
+
+### Cartesia (Phase 2b — evaluate only if ElevenLabs also marginal)
 
 - **API:** streaming TTS via WebSocket; first audio chunk < 200ms (documented)
 - **SDK:** `pip install cartesia` — not yet in Pi venv
-- **Auth:** `CARTESIA_API_KEY` — new account required; add to `.env` alongside Deepgram key
+- **Auth:** `CARTESIA_API_KEY` — new account required; add to `.env` alongside other keys
 - **Encoding:** PCM available — plays directly to PyAudio without decode
 - **Latency advantage:** streaming means first audio arrives while synthesis continues;
   meaningful advantage over REST if per-sentence latency matters
@@ -88,15 +99,29 @@ to verify, SDK return type to confirm on first run).
 2. Multi-chunk test: feed a 3-sentence iterator, measure per-chunk latency
 3. Memory check: `ps aux` RSS during synthesis — must stay well under 700 MB total
 
-If per-chunk latency ≤ 1s and quality is acceptable → proceed to Phase 3.
-If latency > 1s → proceed to Phase 2.
+If per-chunk latency ≤ 800ms and quality is acceptable → proceed to Phase 3.
+If latency > 800ms → proceed to Phase 2a.
 
-### Phase 2 — Cartesia (Pi run, only if Phase 1 marginal)
+### Phase 2a — ElevenLabs (Pi run, only if Phase 1 marginal)
+
+`ElevenLabsTTS` is already written in `src/tts.py`. Account already created.
+
+1. `pip install elevenlabs` in Pi venv
+2. Add `ELEVENLABS_API_KEY` to `.env` on Pi
+3. Same standalone tests as Phase 1
+4. Compare first-chunk latency vs Deepgram — Flash v2.5 targets ~75ms
+
+If latency acceptable → proceed to Phase 3 with ElevenLabs.
+If latency still marginal → proceed to Phase 2b.
+
+### Phase 2b — Cartesia (Pi run, only if Phase 2a also marginal)
+
+`CartesiaTTS` is already written in `src/tts.py`.
 
 1. `pip install cartesia` in Pi venv
-2. Write `CartesiaTTS(TTSBackend)` in `src/tts.py`
+2. Create Cartesia account; add `CARTESIA_API_KEY` to `.env` on Pi
 3. Same standalone tests as Phase 1
-4. Compare first-chunk latency vs Deepgram
+4. Compare first-chunk latency vs Deepgram and ElevenLabs
 
 ### Phase 3 — Integrated test (Pi run)
 
@@ -131,10 +156,12 @@ If latency > 1s → proceed to Phase 2.
 
 ```
 tts_evaluation/
-├── AGENTS.md              ← you are here
-├── effort_log.md          ← running session log: findings, measurements, decisions
-├── deepgram_tts_notes.md  ← Deepgram Aura API reference, voice controls, SDK patterns
-└── cartesia_notes.md      ← Cartesia evaluation notes (create if Phase 2 runs)
+├── AGENTS.md                ← you are here
+├── compare_tts.py           ← standalone comparison harness (Phase 1/2 runs)
+├── effort_log.md            ← running session log: findings, measurements, decisions
+├── deepgram_tts_notes.md    ← Deepgram Aura API reference, voice controls, SDK patterns
+├── elevenlabs_notes.md      ← ElevenLabs evaluation notes (create when Phase 2a runs)
+└── cartesia_notes.md        ← Cartesia evaluation notes (create if Phase 2b runs)
 ```
 
 ## Key Files Outside This Folder

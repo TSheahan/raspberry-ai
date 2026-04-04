@@ -13,7 +13,7 @@ independent failure modes observed in the same run:
    acceptable threshold for intended use cases (CPAP check-in, calendar query, bedtime
    routine).
 
-### Setup completed this session
+### Setup completed this session (2026-04-05 — session 1)
 
 - Abstract `TTSBackend` class broken out in `src/tts.py`; `PiperTTS` now inherits from it.
   The Piper synthesis path is disabled via a stub in `PiperTTS.play()` (was already
@@ -24,6 +24,24 @@ independent failure modes observed in the same run:
 - Evaluation folder and AGENTS.md created.
 - Deepgram TTS voice controls reference deposited in `deepgram_tts_notes.md`.
 - Annotation added to `memory/architecture_decisions.md` routing to this folder.
+
+### Setup completed this session (2026-04-05 — session 2)
+
+- `compare_tts.py` created in this folder — standalone comparison harness:
+  - Plays each test sentence through Deepgram then Cartesia in sequence
+  - Measures `latency_ms` (API call → first audio byte received) and `total_ms`
+    (API call → last byte played) per sentence per backend
+  - Reads RSS from `/proc/self/status` during synthesis
+  - Prints comparison table + pre-filled effort_log.md rows for copy-paste
+  - Cartesia section activates automatically when `CARTESIA_API_KEY` and
+    `cartesia` package are present; skips with a clear error otherwise
+  - Run: `python mvp-modules/archive/tts_evaluation/compare_tts.py`
+  - Deepgram-only run: add `--deepgram-only`
+- `CartesiaTTS(TTSBackend)` skeleton added to `src/tts.py`:
+  - WebSocket streaming via `cartesia` SDK (pip install cartesia — not yet in Pi venv)
+  - Per-chunk `ws.send()` call; PCM bytes written to PyAudio as chunks arrive
+  - `CARTESIA_API_KEY` in `.env` required; `voice_id` required constructor arg
+  - Ready to activate as `master.py` backend once Phase 2 evaluation passes
 
 ### Open questions going into Phase 1
 
