@@ -48,9 +48,7 @@ class _InterceptHandler(logging.Handler):
             frame = frame.f_back
             depth += 1
 
-        logger.bind(name=record.name).opt(
-            depth=depth, exception=record.exc_info
-        ).log(level, record.getMessage())
+        logger.opt(depth=depth, exception=record.exc_info).log(level, record.getMessage())
 
 
 def _format(record: dict) -> str:

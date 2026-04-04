@@ -18,13 +18,11 @@ Memory layout (HEADER_SIZE + RING_SIZE bytes):
 Write protocol: data is written before write_pos is advanced.
 Read protocol:  read write_pos first; data is valid if (write_pos - start) <= RING_SIZE.
 """
-import logging
 import struct
 from multiprocessing.shared_memory import SharedMemory
 
 from log_config import TRACE
-
-logger = logging.getLogger("ring_buffer")
+from loguru import logger
 
 # --- Layout ---
 HEADER_SIZE = 64

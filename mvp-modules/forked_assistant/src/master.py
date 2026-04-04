@@ -26,7 +26,6 @@ Usage (on Pi with ReSpeaker):
     AGENT_WORKSPACE=~/raspberry-ai python src/master.py
 """
 
-import logging
 import os
 import sys
 import threading
@@ -37,6 +36,7 @@ from multiprocessing.shared_memory import SharedMemory
 from pathlib import Path
 
 from dotenv import load_dotenv
+from loguru import logger
 
 load_dotenv(override=True)
 
@@ -52,7 +52,7 @@ from ring_buffer import (
     RingBufferReader,
 )
 
-logger = logging.getLogger("master")
+logger = logger.bind(name="master")
 
 # --- Agent / session configuration (override via environment) ---
 _AGENT_WORKSPACE = Path(os.environ.get("AGENT_WORKSPACE", str(Path.home() / "raspberry-ai")))

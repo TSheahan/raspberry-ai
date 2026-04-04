@@ -20,7 +20,6 @@ multiprocessing.Process target by the master.
 """
 
 import asyncio
-import logging
 import math
 import os
 import signal
@@ -32,8 +31,7 @@ from collections import defaultdict, deque
 from multiprocessing.shared_memory import SharedMemory
 
 from log_config import configure_logging, PERF, TRACE
-
-logger = logging.getLogger("recorder_child")
+from loguru import logger
 
 from openwakeword.model import Model as OWWModel
 

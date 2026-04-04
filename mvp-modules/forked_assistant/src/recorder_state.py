@@ -28,15 +28,13 @@ wiring so that RecorderStateStub inherits them without overriding.
 """
 
 import asyncio
-import logging
 import time
 import weakref
 
 import numpy as np
 
 from log_config import TRACE
-
-logger = logging.getLogger("recorder_state")
+from loguru import logger
 
 
 class RecorderState:

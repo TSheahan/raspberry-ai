@@ -29,7 +29,6 @@ See memory/agent_session_patterns.md for design rationale.
 """
 
 import json
-import logging
 import os
 import subprocess
 import time
@@ -38,7 +37,7 @@ from collections.abc import Iterator
 from pathlib import Path
 from typing import Literal, NotRequired, TypedDict
 
-logger = logging.getLogger("agent_session")
+from loguru import logger
 
 
 # ---------------------------------------------------------------------------
