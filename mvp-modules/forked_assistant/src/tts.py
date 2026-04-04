@@ -61,6 +61,14 @@ class PiperTTS:
         text_chunks is typically agent.run(transcript) — a generator that
         yields sentence-boundary-aligned strings as the agent responds.
         """
+        # HACK: TTS disabled — drain the iterator and log text only.
+        # Remove this block to re-enable Piper synthesis.
+        for chunk in text_chunks:
+            chunk = _strip_markdown(chunk)
+            if chunk:
+                logger.info("[tts:stub] {}", chunk)
+        return
+
         stream = self._pa.open(
             format=pyaudio.paInt16,
             channels=1,
