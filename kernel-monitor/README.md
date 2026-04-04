@@ -34,6 +34,67 @@ survive reboot. In-flight capture by this monitor is the only reliable collectio
   ensuring the full crash sequence (including the ~37s TRIG_START→TRIG_STOP gap) lands
   in one file
 
+## Playbooks
+
+### After a crash (Pi has rebooted)
+
+```bash
+# 1. Alarm log — fsynced after every [A] write, best chance of surviving the panic
+sudo tail -50 /var/log/kernel-monitor/alarms.log
+
+# 2. Evidence file — full crash sequence with 40-line pre-alarm context
+sudo cat $(sudo ls -t /var/log/kernel-monitor/evidence/*.txt | head -1)
+
+# 3. Previous boot's kernel ring buffer — journald is persistent on this Pi
+sudo journalctl -k -b -1 --no-pager | grep -E "BUG|panic|Oops|I2S|ac10|seeed"
+```
+
+The `[A] I2S SYNC error` line in `alarms.log` is the earliest observable distress
+signal — it is fsynced to disk before the first `BUG:` arrives ~1ms later.
+
+### Watching live while the agent runs
+
+```bash
+sudo journalctl -u kernel-monitor -f
+```
+
+`[A]` lines indicate real distress. `[V]` lines are noise (suppress with `KM_VERBOSE=0`
+once the pipeline has been exercised).
+
+### Checking service health
+
+```bash
+sudo systemctl status kernel-monitor
+sudo journalctl -u kernel-monitor --since "1 hour ago" --no-pager | grep '\[A\]'
+```
+
+### Updating after a code change
+
+```bash
+git pull
+sudo systemctl restart kernel-monitor
+sudo systemctl status kernel-monitor --no-pager
+```
+
+### Disabling verbose mode
+
+Once the pipeline is confirmed working, silence `[V]` output. Edit the deployed unit:
+
+```bash
+sudo systemctl edit kernel-monitor
+```
+
+Add:
+```ini
+[Service]
+Environment=KM_VERBOSE=0
+```
+
+Then `sudo systemctl restart kernel-monitor`. Or at the command line:
+`sudo KM_VERBOSE=0 python3 monitor.py`.
+
+---
+
 ## Install
 
 ```bash
@@ -88,16 +149,6 @@ All configuration is at the top of `monitor.py`:
 | `KM_VERBOSE` (env) | `1` | Log noise-matched lines as `[V]`. Set `0` in the service env to silence. |
 | `CONTEXT_LINES` | `40` | Pre-alarm lines prepended to each evidence file. |
 | `EVIDENCE_CLOSE_SECS` | `60` | Seconds of silence before closing an evidence file. |
-
-### Disabling verbose mode
-
-Once exercised and confirmed working, suppress `[V]` output by adding to the service unit:
-
-```
-Environment=KM_VERBOSE=0
-```
-
-Or override at the command line: `sudo KM_VERBOSE=0 python3 monitor.py`.
 
 ## Alarm patterns
 
