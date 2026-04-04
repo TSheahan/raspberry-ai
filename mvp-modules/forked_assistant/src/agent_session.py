@@ -237,7 +237,11 @@ class CursorAgentSession(AgentSession):
         resume_window_secs: float = _DEFAULT_RESUME_WINDOW,
     ) -> None:
         super().__init__(resume_window_secs=resume_window_secs)
-        if not workspace.is_dir():
+        try:
+            exists = workspace.is_dir()
+        except PermissionError:
+            exists = True  # path exists but is not readable by this process (expected with AGENT_USER)
+        if not exists:
             raise ValueError(f"Agent workspace not found: {workspace}")
         self._workspace = workspace
         self._model = model
