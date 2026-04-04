@@ -122,8 +122,8 @@ def _run_capture(
             sample_rate=SAMPLE_RATE,
             channels=CHANNELS,
             language="en-US",
-            smart_format=True,
-            interim_results=True,
+            smart_format="true",
+            interim_results="true",
             endpointing=300,
         ) as conn:
             conn.on(EventType.MESSAGE, on_message)
