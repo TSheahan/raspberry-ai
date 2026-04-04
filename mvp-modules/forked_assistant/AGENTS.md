@@ -53,8 +53,8 @@ forked_assistant/
 | EU-3c | Track 2: Pipeline harness (real Pipecat + stub IPC) | Complete (`test/track2_pipeline_harness.py`) |
 | EU-3d | Merge: Track 1 + Track 2 into real recorder child | Complete (`src/recorder_child.py`, `test/test_harness.py`) |
 | EU-4 | Master process — batch mode (STT + Claude) | Complete (`src/master.py`, proven 2026-04-03) |
-| EU-5 | Streaming STT — Deepgram live WebSocket + ring buffer tail | Code written (`src/master.py`); Pi validation pending |
-| EU-6 | Agent module — `AgentSession` abstraction + `CursorAgentSession` (Cursor CLI) | Code written (`src/agent_session.py`, integrated in `src/master.py`); Pi validation pending |
+| EU-5 | Streaming STT — Deepgram live WebSocket + ring buffer tail | Complete (`src/master.py`, proven 2026-04-04) |
+| EU-6 | Agent module — `AgentSession` abstraction + `CursorAgentSession` (Cursor CLI) | Complete (`src/agent_session.py`, integrated in `src/master.py`, proven 2026-04-04) |
 
 EU-3b and EU-3c are **parallel tracks** that can be developed independently. EU-3d merges them.
 
@@ -82,28 +82,25 @@ Test files add `sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..',
 
 ## What's Next
 
-### EU-4 validation (rolled into EU-5 Pi session)
+### Step 8 — TTS → audio output
 
-The remaining EU-4 success criteria (agent response on a full turn, 3–5 consecutive cycles, Ctrl+C from CAPTURE) are folded into the EU-5 Pi validation session below. The batch STT and `stub_claude()` / `run_claude()` paths are removed from `master.py`; the EU-5 streaming path is the delivery artifact for step 7.
+Step 7 is complete. `forked_assistant/` delivered the full wake → STT → agent → streamed text response pipeline, proven on Pi on 2026-04-04.
 
-### EU-5 + EU-6 — code written; Pi validation is the next session
-
-`src/master.py` is rewritten with both EU-5 (Deepgram live WebSocket ring-tail) and EU-6 (`CursorAgentSession`) integrated. On WAKE_DETECTED, `agent.prepare()` pre-spawns the agent subprocess and a `_CaptureSession` thread opens the Deepgram live WebSocket and tails the ring buffer at 20 ms intervals. On VAD_STOPPED, the thread is stopped, `send_finalize()` flushes the final transcript, and `agent.run(transcript)` streams the response to stdout.
-
-The Pi validation session needs to confirm:
-1. Deepgram live WebSocket connects and accumulates `is_final` transcripts correctly
-2. KeepAlive fires during silence (no NET-0001 disconnect)
-3. `agent.prepare()` + `agent.run()` produce a streaming response visible on stdout
-4. Multi-turn: 3–5 consecutive turns without degradation
-5. Ctrl+C from CAPTURE state — clean two-phase shutdown with no Pi reboot
-
-See `spec/implementation_framework.md` EU-5 and `archive/2026-04-04_streaming_architecture_analysis.md` for full design rationale. See `spec/agent_session_spec.md` for the `AgentSession` interface contract.
-
-### Step 7 closes on EU-5 Pi session
-
-`forked_assistant/` is the delivery vehicle for `starting_brief.md` step 7 (agentic layer → text response). Step 8 (TTS → audio output) is driven from `starting_brief.md` scope and requires no changes to the recorder child or the process architecture.
+Step 8 (TTS → audio output) is the next scope item from `starting_brief.md`. The agent text stream is the input. The recorder child and process architecture require no changes. Work in `master.py`: consume the streamed text from `agent.run()`, chunk it into TTS-suitable spans (sentence or clause boundaries), synthesise audio, and play through bcm2835 headphones (ALSA device 0). The `AgentSession` interface can be extended to expose the stream directly if sentence-boundary chunking is needed before synthesis.
 
 ## Completed Effort Units
+
+### EU-5 + EU-6 — complete (2026-04-04)
+
+Streaming STT + agent session proven on Pi across three runs (`scratch/executions/2026-04-04_EU-5_tests/`):
+
+- **Run 1:** TRANSCRIPT "Hello." — Deepgram WebSocket connected and delivered `is_final`; `agent.prepare()` pre-spawned correctly; Ctrl+C while agent generating → clean shutdown.
+- **Run 2:** TRANSCRIPT "Summarize what files you can see." — full streamed response: 21.4 s, 678 output tokens, `cache_read=35195`; master looped back to `wake_listen`; clean shutdown from `wake_listen`.
+- **Run 3:** Full turn complete; master looped back to listening; clean shutdown from idle; 1/2817 frames over 20 ms budget (0.0%).
+
+All EU-5 validation criteria met: Deepgram live WebSocket connects and accumulates `is_final` transcripts; KeepAlive fires (no NET-0001 disconnect); `agent.prepare()` + `agent.run()` produce streaming text response; 3 consecutive turns across runs without degradation; Ctrl+C from idle, wake_listen, and during agent generation all produce clean SHUTDOWN_FINISHED → `[master] done` with no Pi reboot.
+
+**Step 7 closed.** The streamed text output from `agent.run()` is ready for TTS.
 
 ### EU-4 — complete (2026-04-03)
 

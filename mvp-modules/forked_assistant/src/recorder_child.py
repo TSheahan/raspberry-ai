@@ -214,7 +214,7 @@ class DutyCycleCollector:
         if self._window_max_qdepth >= 0:
             qdepth_str = f"  q_max={self._window_max_qdepth}"
 
-        logger.log(PERF, "[DUTY/{}] {}: mean={:.1f}ms p95={:.1f}ms max={:.1f}ms util={:.0f}%{}{}",
+        logger.log("PERF", "[DUTY/{}] {}: mean={:.1f}ms p95={:.1f}ms max={:.1f}ms util={:.0f}%{}{}",
                    self._total_frames, phase_lbl, mean, p95, mx, util,
                    arrival_str, qdepth_str)
 
@@ -520,7 +520,7 @@ class OpenWakeWordProcessor(FrameProcessor):
         mean = sum(s) / n
         p95 = DutyCycleCollector._percentile(s, 0.95)
         mx = s[-1]
-        logger.log(PERF, "[OWW/{}] predict: n={} mean={:.1f}ms p95={:.1f}ms max={:.1f}ms",
+        logger.log("PERF", "[OWW/{}] predict: n={} mean={:.1f}ms p95={:.1f}ms max={:.1f}ms",
                    self._predict_count, n, mean, p95, mx)
         self._window_predict_times.clear()
 
@@ -589,7 +589,7 @@ class AudioFrameWriter(FrameProcessor):
             if self._phase_frames == 1 or self._phase_frames % self._LOG_INTERVAL == 0:
                 wp = self.state.write_pos
                 head = struct.unpack_from('<4h', frame.audio)
-                logger.log(TRACE, "[ring/write] phase={} frame={} write_pos={} sample[0:4]={}",
+                logger.log("TRACE", "[ring/write] phase={} frame={} write_pos={} sample[0:4]={}",
                            phase, self._phase_frames, wp, head)
 
         await self.push_frame(frame, direction)

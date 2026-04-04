@@ -8,7 +8,7 @@ End-to-end voice pipeline development for Raspberry Pi 4 (`morpheus`), using Pip
 
 ## Active Development
 
-- **`forked_assistant/`** — Two-process recorder architecture. Recorder child (core 0) owns the microphone and Pipecat pipeline. Master (cores 1–3) runs STT, Claude, and response handling. See `forked_assistant/AGENTS.md` for full context.
+- **`forked_assistant/`** — Two-process recorder architecture. Recorder child (core 0) owns the microphone and Pipecat pipeline. Master (cores 1–3) runs STT, Claude, and response handling. **Step 7 complete (2026-04-04):** full wake → Deepgram live STT → CursorAgentSession → streamed text response proven on Pi. Active work is **step 8 (TTS → audio output)**. See `forked_assistant/AGENTS.md` for full context.
 
 ## Deliverables (concluded steps 4–6)
 
@@ -32,7 +32,8 @@ End-to-end voice pipeline development for Raspberry Pi 4 (`morpheus`), using Pip
 | Directory | Effort | Date | Outcome |
 |-----------|--------|------|---------|
 | `archive/step6/` | Wake + capture + STT pipeline | 2026-03-31 | Success. Delivered `voice_pipeline_step6.py` |
-| `archive/step7/` | Agentic layer (single-process) | 2026-03-31 to 2026-04-01 | Operational path works; shutdown crash unresolvable in single process. Pivoted to `forked_assistant/` |
+| `archive/step7/` | Agentic layer attempt (single-process) | 2026-03-31 to 2026-04-01 | Operational path works; shutdown crash unresolvable in single process. Pivoted to `forked_assistant/` |
+| `forked_assistant/` (step 7) | Agentic layer (two-process) | 2026-04-02 to 2026-04-04 | **Success.** Full pipeline proven: wake → Deepgram live STT → CursorAgentSession → streamed text response. All EU-1 through EU-6 complete. Step 8 (TTS) in progress. |
 
 Each archive has its own `AGENTS.md` with context on what was learned and why it's archived.
 

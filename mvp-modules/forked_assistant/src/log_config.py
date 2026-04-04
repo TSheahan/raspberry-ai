@@ -33,6 +33,11 @@ PERF  = 8
 # Register PERF with loguru. TRACE already exists natively at level 5.
 logger.level("PERF", no=PERF, color="<magenta>", icon="⚡")
 
+# Loguru does NOT reverse-map severity numbers back to level names.
+# logger.log(8, ...) emits "Level 8"; logger.log("PERF", ...) emits "PERF   ".
+# Use the integer constants (PERF, TRACE) for threshold comparisons only.
+# Use the string name ("PERF", "TRACE") in all logger.log() call sites.
+
 # Resolved numeric level — set by configure_logging(), read by callers that
 # need the active threshold without re-parsing the environment.
 _active_level_no: int = 20  # INFO until configure_logging() runs
