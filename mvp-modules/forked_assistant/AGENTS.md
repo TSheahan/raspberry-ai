@@ -28,6 +28,7 @@ forked_assistant/
 │   ├── recorder_state.py         ← RecorderState base class: phase logic, processor hooks
 │   ├── recorder_child.py         ← EU-3d: merged recorder subprocess (RecorderChild + Pipecat pipeline)
 │   ├── agent_session.py          ← EU-6: AgentSession base + CursorAgentSession implementation
+│   ├── tts.py                    ← EU-7: PiperTTS wrapper (Piper ONNX + PyAudio device 0)
 │   └── master.py                 ← EU-4: master process — batch-mode cognitive loop
 ├── test/              ← harnesses and smoke tests
 │   ├── smoke_test_shm.py         ← EU-1+EU-2: SharedMemory and ring buffer IPC tests
@@ -82,11 +83,17 @@ Test files add `sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..',
 
 ## What's Next
 
-### Step 8 — TTS → audio output
+### Step 8 — TTS → audio output (EU-7, in progress)
 
-Step 7 is complete. `forked_assistant/` delivered the full wake → STT → agent → streamed text response pipeline, proven on Pi on 2026-04-04.
+`src/tts.py` is written (`PiperTTS` — Piper ONNX + PyAudio device 0). Two changes remain before step 8 is ready for Pi validation:
 
-Step 8 (TTS → audio output) is the next scope item from `starting_brief.md`. The agent text stream is the input. The recorder child and process architecture require no changes. Work in `master.py`: consume the streamed text from `agent.run()`, chunk it into TTS-suitable spans (sentence or clause boundaries), synthesise audio, and play through bcm2835 headphones (ALSA device 0). The `AgentSession` interface can be extended to expose the stream directly if sentence-boundary chunking is needed before synthesis.
+1. **`agent_session.py`** — refactor `run()` to yield sentence chunks live from streaming deltas (replacing the current end-of-stream batch yield). Replace `_word_boundary_chunks` with `_sentence_chunks` that buffers to `[.!?]` boundaries. Track `yielded_text`; yield tail from `result.result` after the stream ends.
+
+2. **`master.py`** — import `PiperTTS`; add `_PIPER_MODEL_PATH` env var (default `~/piper-models/en_US-lessac-medium.onnx`); instantiate in `master_loop` alongside agent/DG; update `cognitive_loop` to accept and call `tts.play(agent.run(transcript))`; add `tts.close()` to the `finally` block.
+
+Pi provisioning before first run: `profiling-pi/piper-tts-setup.md`.
+
+OWW barge-in is already protected: `SET_IDLE` is sent before `cognitive_loop` and `SET_WAKE_LISTEN` only after it returns — TTS runs entirely in the idle window. OWW inference is gated to `wake_listen` phase only (`recorder_child.py` line 466). No additional gate needed. Cross-process Piper/OWW ONNX concurrency (separate processes, separate pinned cores) is a Pi validation item — watch duty-cycle reports during first TTS run.
 
 ## Completed Effort Units
 

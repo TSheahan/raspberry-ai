@@ -39,3 +39,6 @@ onnxruntime==1.23.2
 # --- EU-4 additions: already installed in Pi venv, no pin until verified ---
 deepgram-sdk
 python-dotenv
+
+# --- EU-7 (step 8 TTS): no pin until verified on Pi venv ---
+piper-tts
