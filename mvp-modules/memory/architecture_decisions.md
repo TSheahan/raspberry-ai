@@ -235,6 +235,14 @@ Each call processes one 1280-sample (80ms) chunk. Calls fire every 4 audio frame
 
 **Observation:** predict runs consistently above the 20ms frame budget, but the pipeline tolerates this because predict fires only every 4 frames (80ms interval). The frame budget alarm is not triggered because duty cycle (bookend measurement) correctly shows low utilization — the `to_thread` offloads the cost off the event loop.
 
+## TTS Playback Is Covered by the Idle-Phase Bracket (2026-04-04)
+
+**Confirmed:** TTS playback (step 8) inherits OWW/Silero protection from the existing idle-phase protocol with no additional gates required.
+
+`master_loop` sends `SET_IDLE` immediately on `VAD_STOPPED`, then calls `cognitive_loop()`. TTS runs inside `cognitive_loop`. `SET_WAKE_LISTEN` is sent in a `finally` block after `cognitive_loop()` returns. OWW inference gates on `state.wake_listen` (`recorder_child.py` line 466) — False throughout idle. The entire STT → agent → TTS span is bracketed.
+
+**Cross-process ONNX concurrency (Piper + OWW):** During TTS playback, master runs Piper ONNX on cores 1–3 while the recorder child is in idle phase on core 0 (SCHED_FIFO). OWW is gated off in idle, so there is no concurrent ONNX within the recorder child. However, if a future change re-enables OWW during idle, cross-process ONNX would run simultaneously — separate processes with separate ONNX sessions on separate pinned cores. This has not been characterised on Pi 4; flag as a validation item on first TTS run (watch duty-cycle reports for thermal / cache-pressure effects on OWW predict timing).
+
 ## Why Recorder Is Capture-Only
 
 The recorder child owns the microphone and nothing else. Playback (TTS) belongs to the master or a future separate process. This keeps the child simple and aligned with the ReSpeaker hat's input-focused design. It also avoids bidirectional audio I/O races in the same process.
