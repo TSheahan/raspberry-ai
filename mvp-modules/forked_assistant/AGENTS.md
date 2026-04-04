@@ -21,11 +21,13 @@ forked_assistant/
 │   ├── interface_spec.md          ← ring buffer layout, pipe message shapes
 │   ├── recorder_state_spec.md     ← recorder state machine: DORMANT/WAKE_LISTEN/CAPTURE
 │   ├── stub_contracts.md          ← EU-3 parallel tracks: stub vs real IPC
+│   ├── agent_session_spec.md      ← EU-6: AgentSession abstract interface + CursorAgentSession contract
 │   └── implementation_framework.md ← EU phasing, session principles, dependency graph (READ FIRST)
 ├── src/               ← library code
 │   ├── ring_buffer.py             ← SharedMemory ring: writer/reader, header format
 │   ├── recorder_state.py         ← RecorderState base class: phase logic, processor hooks
 │   ├── recorder_child.py         ← EU-3d: merged recorder subprocess (RecorderChild + Pipecat pipeline)
+│   ├── agent_session.py          ← EU-6: AgentSession base + CursorAgentSession implementation
 │   └── master.py                 ← EU-4: master process — batch-mode cognitive loop
 ├── test/              ← harnesses and smoke tests
 │   ├── smoke_test_shm.py         ← EU-1+EU-2: SharedMemory and ring buffer IPC tests
@@ -34,7 +36,10 @@ forked_assistant/
 │   └── test_harness.py            ← EU-3d: master-side harness (spawns real recorder child)
 └── archive/           ← superseded snapshots
     ├── 2026-04-02T1400_track2_pipeline_harness.py ← v01 baseline (no ring write simulation)
-    └── 2026-04-02T1401_track2_pipeline_harness.py ← v03 dead end (per-processor timing, wrong instrumentation unit)
+    ├── 2026-04-02T1401_track2_pipeline_harness.py ← v03 dead end (per-processor timing, wrong instrumentation unit)
+    ├── 2026-04-04_streaming_architecture_analysis.md ← EU-5 design brief: streaming vs batch STT analysis
+    ├── 2026-04-04_wrapped_cursor_agent.py           ← Cursor CLI pre-spawn smoke test (EU-6 reference)
+    └── 2026-04-04_wrapped_cursor_agent_context.md   ← Cursor CLI invocation pattern, stream-json schema, findings
 ```
 
 ## Implementation Phasing (Effort Units)
@@ -49,7 +54,7 @@ forked_assistant/
 | EU-3d | Merge: Track 1 + Track 2 into real recorder child | Complete (`src/recorder_child.py`, `test/test_harness.py`) |
 | EU-4 | Master process — batch mode (STT + Claude) | Complete (`src/master.py`, proven 2026-04-03) |
 | EU-5 | Streaming STT — Deepgram live WebSocket + ring buffer tail | Pending (required for step 7) |
-| EU-6 | Streaming Claude — Popen stdout pipe, incremental output | Pending (required for step 7) |
+| EU-6 | Agent module — `AgentSession` abstraction + `CursorAgentSession` (Cursor CLI) | Pending (`src/agent_session.py` written; master.py integration deferred to Pi session) |
 
 EU-3b and EU-3c are **parallel tracks** that can be developed independently. EU-3d merges them.
 
@@ -69,22 +74,21 @@ Test files add `sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..',
 
 ## What's Next
 
-### EU-4 validation run (one Pi session, prerequisite for EU-5)
+### EU-4 validation run (deferred — token quota)
 
-A single Pi session to close out the remaining EU-4 success criteria:
-- Confirm Claude response text prints on a complete turn (run 3 was interrupted before response)
-- 3–5 consecutive wake→capture→STT→Claude→wake_listen cycles without degradation
-- Ctrl+C from CAPTURE state (run 3 tested from WAKE_LISTEN only)
+The remaining EU-4 success criteria (Claude response on a full turn, 3–5 consecutive cycles, Ctrl+C from CAPTURE) are deferred until the Claude token quota resets. `master.py` currently calls `stub_claude()` in place of `run_claude()` and will be swapped back when quota allows. These criteria do not block EU-5 or EU-6 implementation.
 
-### EU-5 — Streaming STT (required for step 7 completion)
+### EU-6 — Agent module (code written; Pi integration pending)
 
-Add Deepgram live WebSocket STT in master: on WAKE_DETECTED, open a live session, tail the ring buffer at ~20ms intervals sending chunks, accumulate `is_final` transcripts, terminate on VAD_STOPPED. No recorder child changes. See `spec/implementation_framework.md` EU-5 for full spec.
+`src/agent_session.py` is complete. It provides `AgentSession` (abstract base) and `CursorAgentSession` (Cursor CLI implementation). The Pi integration — wiring `prepare()` to WAKE_DETECTED and `run()` into the cognitive loop — is deferred to the EU-5 Pi session (both land in `master.py` together). See `spec/agent_session_spec.md` for the full interface contract and `memory/agent_session_patterns.md` for design rationale.
 
-### EU-6 — Streaming Claude response (required for step 7 completion)
+### EU-5 — Streaming STT (Pi session, with EU-6 integration)
 
-Replace `subprocess.run(["claude", "-p", ...])` with `Popen` + stdout pipe, printing response text incrementally as it arrives. ~30 lines replacing `run_claude()`. See `spec/implementation_framework.md` EU-6 for spec.
+Add Deepgram live WebSocket STT in master: on WAKE_DETECTED, open a live session and call `agent.prepare()` concurrently, tail the ring buffer at ~20ms intervals sending chunks with KeepAlive during silence, accumulate `is_final` transcripts, terminate on VAD_STOPPED. On transcript ready, call `agent.run(transcript)` and yield deltas to TTS. No recorder child changes required.
 
-### Step 7 closes on EU-6 delivery
+**API correction:** The EU-5 spec previously referenced `dg_client.listen.live.v("1")` — this is the v2/v3 SDK pattern. Current SDK (v6) uses `dg_client.listen.v1.connect(...)` as a context manager. See `spec/implementation_framework.md` EU-5 and `archive/2026-04-04_streaming_architecture_analysis.md` for full details.
+
+### Step 7 closes on EU-5 Pi session
 
 `forked_assistant/` is the delivery vehicle for `starting_brief.md` step 7 (agentic layer → text response). Step 8 (TTS → audio output) is driven from `starting_brief.md` scope and requires no changes to the recorder child or the process architecture.
 

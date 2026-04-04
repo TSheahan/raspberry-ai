@@ -254,11 +254,11 @@ Remaining validation before step 7 closes: (1) confirm Claude response text prin
 **Goal:** Replace the batch STT path with a live Deepgram WebSocket session that tails the ring buffer as the recorder child writes it. Streaming STT is required before step 7 closes — it is not optional. The ring buffer + signal protocol was designed specifically to make this possible without touching the recorder child.
 
 **Deliverable:** Streaming mode in `src/master.py` that:
-1. On WAKE_DETECTED: opens a Deepgram live WebSocket session
-2. Spawns a ring buffer tail loop that reads newly written frames and sends them to the WebSocket
-3. Receives and accumulates partial transcripts
-4. Terminates on VAD_STOPPED (the primary policy); ring tail stops, final transcript assembled
-5. Passes completed transcript to EU-6's `run_claude_streaming()` (see below)
+1. On WAKE_DETECTED: opens a Deepgram live WebSocket session **and** calls `agent.prepare()` concurrently (agent pre-spawn hides startup latency behind the STT window)
+2. Spawns a ring buffer tail thread that reads newly written frames and sends them to the WebSocket
+3. Receives and accumulates `is_final` transcripts
+4. Terminates on VAD_STOPPED (the primary policy); sends `send_finalize()` → `send_close_stream()`, assembles final transcript
+5. Passes completed transcript to `agent.run(transcript)` (EU-6's `AgentSession`); iterates text deltas to TTS
 6. Sends SET_WAKE_LISTEN and returns to listening
 
 **Termination policy note:** VAD_STOPPED is the initial termination trigger (same timing as EU-4's batch mode). The architecture supports extending this to a timeout fallback or explicit command without changing the recorder child.
@@ -266,34 +266,79 @@ Remaining validation before step 7 closes: (1) confirm Claude response text prin
 **Recorder child changes:** None. The child already writes continuously to the ring buffer and sends VAD_STARTED / VAD_STOPPED over the pipe. EU-5 is entirely a master-side change.
 
 **Implementation notes:**
-- Deepgram live WebSocket: `dg_client.listen.live.v("1")` with `on_message` callback to accumulate `is_final` transcripts
-- Ring tail loop: poll `ring_reader.write_pos` at ~20ms intervals, send new bytes to the WebSocket, stop on VAD_STOPPED signal from pipe
-- The master is currently synchronous; the ring tail loop will need to run in a thread (`threading.Thread`) alongside the blocking pipe recv, or the master event loop needs a small restructure. Evaluate at implementation time.
-- EU-4's `transcribe()` function is replaced by this path; `cognitive_loop()` gains a streaming STT entry point
 
-**Estimated scope:** ~80 lines added to master. One Pi session.
+- **API correction (SDK v6):** The original spec referenced `dg_client.listen.live.v("1")` — this is the v2/v3 SDK pattern and is no longer correct. Current SDK (v6, March 2026) uses:
+  ```python
+  with dg_client.listen.v1.connect(
+      model="nova-3", encoding="linear16", sample_rate=16000,
+      channels=1, language="en-US", smart_format=True,
+      interim_results=True, endpointing=300,
+  ) as connection:
+      connection.on(EventType.MESSAGE, on_message)
+      listen_thread = threading.Thread(target=connection.start_listening, daemon=True)
+      listen_thread.start()
+      # ... ring tail sends connection.send_media(audio_bytes) ...
+      connection.send_finalize()
+      time.sleep(0.2)
+      connection.send_close_stream()
+  ```
+  See `archive/2026-04-04_streaming_architecture_analysis.md` §2.1 for full corrected pattern.
+
+- **KeepAlive is mandatory:** Deepgram closes the WebSocket with `NET-0001` after 10s of silence. The ring tail thread must send `connection.send_keep_alive()` every 3–4s when `write_pos` has not advanced. Critical for dictation mode with long inter-sentence pauses.
+
+- **Mixed mode (recommended):** Keep Silero VAD as the dispatch trigger. Deepgram's own endpointing is advisory only. `is_final=True` results accumulate throughout the capture session; `send_finalize()` flushes the last fragment on VAD_STOPPED. Net STT latency: ~50–150ms (vs ~1.8s batch). See `archive/2026-04-04_streaming_architecture_analysis.md` §3.2 for full analysis.
+
+- **Ring tail thread:** `threading.Thread` alongside the blocking `pipe.recv()` main loop. Polls `ring_reader.write_pos` at ~20ms intervals.
+
+- **`cognitive_loop()` signature change:** `(audio_bytes, dg_client)` → `(transcript: str, agent: AgentSession)`. The `transcribe()` and `run_claude()` / `stub_claude()` functions are retired.
+
+**Estimated scope:** ~80 lines added to master. One Pi session (EU-5 + EU-6 integration land together).
 
 ---
 
-### EU-6: Streaming Claude Response
+### EU-6: Agent Module — `AgentSession` Abstraction
 
-**Goal:** Replace the blocking `subprocess.run(["claude", "-p", ...])` call with a piped subprocess that streams response text incrementally as it arrives, printing each chunk in real time.
+**Goal:** Replace the blocking `run_claude()` / `stub_claude()` call with a modular agent abstraction that supports pre-spawning on WAKE_DETECTED, streaming text delta output for TTS, and session continuity across conversation turns.
 
-**Deliverable:** `run_claude_streaming(transcript)` function in `src/master.py` that:
-1. Opens `claude -p` as a `subprocess.Popen` with `stdout=PIPE`
-2. Reads stdout in a loop, printing each chunk as it arrives
-3. Accumulates the full response for logging / latency measurement
-4. Returns the complete response text on subprocess exit
+**Deliverable:** `src/agent_session.py` containing:
+- `AgentSession` — abstract base class defining the interface `master.py` uses
+- `CursorAgentSession(AgentSession)` — Cursor CLI implementation (proven on Pi via smoke test)
+- TypedDict event schema, `parse_stream_line()`, `extract_delta_text()` utilities
+- Word-boundary buffer: holds tail of each delta up to last whitespace, yields complete portions only
 
-**Why this matters for step 7:** The EU-4 batch pattern (`subprocess.run` blocking until Claude exits) means no output appears until the full response is ready — the user hears silence during the Claude call. Streaming output gives progressive feedback that the system is working, and naturally extends to TTS chunking in step 8 (text chunks can be fed to Piper as they arrive without waiting for the full response).
+**Why this replaces the original EU-6 scope:**
+- Cursor CLI (`~/.local/bin/agent`) is preferred over Claude CLI: not subject to Claude token quota exhaustion; runs under Cursor subscription; proven working on Pi ARM64 (2026-04-04 smoke test).
+- Pre-spawn pattern: agent process is spawned on WAKE_DETECTED and waits with stdin open. By VAD_STOPPED the process is already initialised — startup latency is hidden behind the Deepgram streaming window.
+- Session continuity: `--resume session_id` passes context across turns within a configurable time window (`AGENT_RESUME_WINDOW_SECS`, default 300s). After the window expires, a fresh session is started automatically.
+- Interchangeability: `AgentSession` base class allows future backends (alternative models, direct API) to be swapped in without touching `master.py`.
 
-**Implementation notes:**
-- `Popen(["claude", "-p", transcript, "--model", ...], stdout=PIPE, stderr=PIPE, text=True)`
-- Read loop: `for chunk in iter(lambda: proc.stdout.read(64), ""):` or line-by-line via `readline()`
-- Print each chunk immediately; accumulate for full-response return
-- stderr captured separately; log on non-zero exit
+**Interface contract:**
+```python
+class AgentSession:
+    def prepare(self) -> None: ...          # pre-spawn on WAKE_DETECTED
+    def run(self, transcript: str) -> Iterator[str]: ...  # yield TTS-safe text deltas
+    def close(self) -> None: ...            # cleanup
+    @property
+    def session_id(self) -> str | None: ...
+    @property
+    def last_turn_time(self) -> float: ...  # monotonic; 0.0 before first turn
+```
 
-**Estimated scope:** ~30 lines replacing `run_claude()`. One session alongside EU-5.
+**Cursor CLI invocation:**
+```
+agent -p --output-format stream-json --stream-partial-output
+      --force --yolo --trust
+      --workspace <workspace>
+      --model <model>
+      [--resume <session_id>]
+```
+stdin receives the transcript; stdout is a stream of newline-delimited JSON events. See `spec/agent_session_spec.md` for full contract and `archive/2026-04-04_wrapped_cursor_agent_context.md` for stream-json schema reference.
+
+**Known regression:** Claude CLI `-p` with `subprocess.run` has a known empty-stdout regression (v2.1.83). Cursor CLI via `stream-json` / `Popen` is not affected.
+
+**Status:** `src/agent_session.py` is written. Pi integration (wiring `prepare()` to WAKE_DETECTED and `run()` into `cognitive_loop()`) is deferred to the EU-5 Pi session — both changes land in `master.py` together.
+
+**Estimated scope:** ~160 lines (`agent_session.py` written). Pi integration ~30 lines in `master.py`.
 
 ---
 
@@ -395,9 +440,11 @@ EU-3b (Track 1:        EU-3c (Track 2:        ← parallel
              │
              ▼
            EU-5 (Streaming STT — Deepgram live WebSocket + ring buffer tail)
-             │
-             ▼
-           EU-6 (Streaming Claude — Popen stdout pipe, incremental output)
+             │                         ┐
+             │                         EU-6 (Agent module — AgentSession + CursorAgentSession)
+             │                         │  src/agent_session.py written; Pi integration in EU-5 session
+             ▼                         ┘
+        master.py restructure (EU-5 + EU-6 Pi session — cognitive loop wiring)
              │
              ▼
         *** Step 7 complete — forked_assistant/ closes ***
@@ -409,7 +456,7 @@ EU-3b (Track 1:        EU-3c (Track 2:        ← parallel
         Step 8: TTS → audio output  (driven from starting_brief.md)
 ```
 
-EU-1 through EU-4 are complete. EU-5 and EU-6 are required to close step 7. EU-5 and EU-6 are master-only changes — the recorder child is frozen. Step 8 is out of scope for `forked_assistant/`.
+EU-1 through EU-4 are complete. EU-5 and EU-6 are required to close step 7. Both are master-only changes — the recorder child is frozen. `src/agent_session.py` (EU-6) is written; its integration into `master.py` and EU-5's streaming STT land together in the same Pi session. Step 8 is out of scope for `forked_assistant/`.
 
 ---
 
@@ -427,7 +474,8 @@ forked_assistant/
     ring_buffer.py               ← EU-2
     recorder_state.py            ← EU-3a  (RecorderState base class)
     recorder_child.py            ← EU-3d  (merged, permanent)
-    master.py                    ← EU-4/EU-5/EU-6 (streaming STT + Claude added here)
+    agent_session.py             ← EU-6   (AgentSession base + CursorAgentSession; written)
+    master.py                    ← EU-4/EU-5/EU-6 (streaming STT + agent integration in Pi session)
   test/
     smoke_test_shm.py            ← EU-1
     track1_ipc_harness.py        ← EU-3b  (throwaway after merge)
