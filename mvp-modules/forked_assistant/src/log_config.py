@@ -15,11 +15,14 @@ Usage:
 LOG_LEVEL env var controls the root level. Accepts: TRACE, PERF, DEBUG,
 INFO, WARNING, ERROR. Default: INFO.
 
-  TRACE (5)  — per-frame ring writes, OWW chunk clears, duty cycle windows
+  TRACE (5)  — per-frame ring reads/writes, OWW chunk clears, duty cycle windows
   PERF  (8)  — duty cycle bookend processors composed into pipeline;
                periodic window reports emitted; all DEBUG messages visible
-  DEBUG (10) — state transitions, stream ops, OWW/Silero resets, ring detail
+  DEBUG (10) — state transitions, stream ops, OWW/Silero resets
   INFO  (20) — wake/VAD events, transcripts, latencies, shutdown summaries
+
+Log format mirrors Pipecat (loguru default):
+  2026-04-04 16:31:53.607 | INFO     | master - [master] recorder child READY
 """
 
 import logging
@@ -42,7 +45,7 @@ def configure_logging(default_level: str = "INFO") -> None:
     level = _custom.get(level_name, getattr(logging, level_name, logging.INFO))
     logging.basicConfig(
         level=level,
-        format="%(asctime)s.%(msecs)03d %(levelname)-5s %(name)s: %(message)s",
-        datefmt="%H:%M:%S",
+        format="%(asctime)s.%(msecs)03d | %(levelname)-8s | %(name)s - %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S",
         force=True,
     )

@@ -104,6 +104,9 @@ def _run_capture(
             return
         if not message.is_final:
             return
+        # Note: post-CloseStream Results with from_finalize=false have been
+        # observed in practice (EU-5 runs 2026-04-04) and have been consistently
+        # empty. Handled correctly by the is_final guard above; no action needed.
         try:
             text = message.channel.alternatives[0].transcript.strip()
             if text:
@@ -156,6 +159,16 @@ def _run_capture(
                     conn.send_media(chunk)
 
             conn.send_finalize()
+            # 200ms pause lets Deepgram flush trailing results before CloseStream.
+            # This blocks master for ~460ms total (sleep + WS close + listen join)
+            # before SET_IDLE and cognitive_loop can start. A potential optimisation
+            # is to feed the transcript to the agent immediately at VAD_STOPPED and
+            # skip waiting for finalize results. Timing analysis (EU-5 runs 2026-04-04)
+            # shows this is low-risk — the definitive is_final arrives well before
+            # VAD_STOPPED in practice — but agents do not accept supplemental input
+            # while responding, so any trailing Deepgram segment would be silently
+            # lost. Adopt only once the chance of trailing-text loss is satisfactorily
+            # characterised across longer utterances.
             time.sleep(0.2)
             conn.send_close_stream()
             listen_thread.join(timeout=2)

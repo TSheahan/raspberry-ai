@@ -198,13 +198,21 @@ class RecorderState:
     # -----------------------------------------------------------------------
 
     async def _start_stream(self) -> None:
-        """Start the PyAudio input stream."""
+        """Start the PyAudio input stream.
+
+        Retries for up to 200ms to tolerate the startup race: READY is sent
+        from recorder_child before runner.run() is called, so the first
+        SET_WAKE_LISTEN can arrive before _in_stream exists. In practice the
+        stream is ready within a few ms of the first audio frame.
+        """
         t = self._transport_ref
-        if t and hasattr(t, '_in_stream') and t._in_stream:
-            t._in_stream.start_stream()
-            logger.debug("[state] stream started")
-        else:
-            logger.warning("[stream] start skipped — no truthy _in_stream")
+        for _ in range(20):  # 20 × 10ms = 200ms ceiling
+            if t and hasattr(t, '_in_stream') and t._in_stream:
+                t._in_stream.start_stream()
+                logger.debug("[state] stream started")
+                return
+            await asyncio.sleep(0.010)
+        logger.warning("[stream] start skipped — _in_stream not ready after 200ms")
 
     async def _stop_stream(self) -> None:
         """Stop the PyAudio input stream.

@@ -137,7 +137,7 @@ class RingBufferReader:
             return b''
         base   = HEADER_SIZE
         offset = start_pos % RING_SIZE
-        logger.debug("read %d bytes [%d:%d]", length, start_pos, end_pos)
+        logger.log(TRACE, "read %d bytes [%d:%d]", length, start_pos, end_pos)
         if offset + length <= RING_SIZE:
             return bytes(self._shm.buf[base + offset : base + offset + length])
         split  = RING_SIZE - offset
