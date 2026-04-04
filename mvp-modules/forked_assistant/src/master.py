@@ -111,12 +111,12 @@ def _run_capture(
             text = message.channel.alternatives[0].transcript.strip()
             if text:
                 capture.add_transcript(text)
-                logger.debug("[dg-live] is_final: %r", text)
+                logger.debug("[dg-live] is_final: {!r}", text)
         except Exception as exc:
-            logger.debug("[dg-live] on_message parse error: %s", exc)
+            logger.debug("[dg-live] on_message parse error: {}", exc)
 
     def on_error(error) -> None:
-        logger.error("[dg-live] error: %s", error)
+        logger.error("[dg-live] error: {}", error)
 
     try:
         with dg_client.listen.v1.connect(
@@ -174,7 +174,7 @@ def _run_capture(
             listen_thread.join(timeout=2)
 
     except Exception as exc:
-        logger.error("[dg-live] capture session error: %s", exc)
+        logger.error("[dg-live] capture session error: {}", exc)
 
 
 # ---------------------------------------------------------------------------
@@ -186,15 +186,15 @@ def cognitive_loop(transcript: str, agent: AgentSession) -> None:
     if not transcript:
         logger.warning("no transcript — skipping cognitive loop")
         return
-    logger.info("TRANSCRIPT: %s", transcript)
+    logger.info("TRANSCRIPT: {}", transcript)
     loop_start = time.monotonic()
     try:
         for text_chunk in agent.run(transcript):
             print(text_chunk, end="", flush=True)
         print()
     except AgentError as exc:
-        logger.error("[agent] error: %s", exc)
-    logger.info("cognitive loop latency: %.2fs", time.monotonic() - loop_start)
+        logger.error("[agent] error: {}", exc)
+    logger.info("cognitive loop latency: {:.2f}s", time.monotonic() - loop_start)
 
 
 # ---------------------------------------------------------------------------
@@ -273,14 +273,14 @@ def master_loop(pipe, shm: SharedMemory, child: Process) -> None:
             cmd = msg["cmd"]
 
             if cmd == "STATE_CHANGED":
-                logger.debug("[master] state -> %s", msg["state"])
+                logger.debug("[master] state -> {}", msg["state"])
 
             elif cmd == "WAKE_DETECTED":
                 if processing:
                     logger.warning("[master] still processing previous utterance, ignoring wake")
                     continue
                 wake_pos = msg["write_pos"]
-                logger.info("[master] WAKE_DETECTED  score=%.3f  keyword=%s",
+                logger.info("[master] WAKE_DETECTED  score={:.3f}  keyword={}",
                             msg["score"], msg["keyword"])
 
                 # Pre-spawn agent (hides startup latency behind the STT window)
@@ -296,10 +296,10 @@ def master_loop(pipe, shm: SharedMemory, child: Process) -> None:
                 pipe.send({"cmd": "SET_CAPTURE"})
 
             elif cmd == "VAD_STARTED":
-                logger.info("[master] VAD_STARTED    write_pos=%d", msg["write_pos"])
+                logger.info("[master] VAD_STARTED    write_pos={}", msg["write_pos"])
 
             elif cmd == "VAD_STOPPED":
-                logger.info("[master] VAD_STOPPED    write_pos=%d", msg["write_pos"])
+                logger.info("[master] VAD_STOPPED    write_pos={}", msg["write_pos"])
 
                 # Stop the ring tail and wait for Deepgram to finalize.
                 if capture is not None:
@@ -315,7 +315,7 @@ def master_loop(pipe, shm: SharedMemory, child: Process) -> None:
                 try:
                     cognitive_loop(transcript, agent)
                 except Exception as exc:
-                    logger.error("cognitive loop error: %s", exc)
+                    logger.error("cognitive loop error: {}", exc)
                 finally:
                     processing = False
                     try:
@@ -329,7 +329,7 @@ def master_loop(pipe, shm: SharedMemory, child: Process) -> None:
                 return
 
             elif cmd == "ERROR":
-                logger.error("[master] ERROR from child: %s", msg.get("msg", "?"))
+                logger.error("[master] ERROR from child: {}", msg.get("msg", "?"))
 
     finally:
         agent.close()
@@ -362,7 +362,7 @@ def main() -> None:
     child.start()
     child_conn.close()
 
-    logger.info("[master] recorder child spawned (pid=%d)", child.pid)
+    logger.info("[master] recorder child spawned (pid={})", child.pid)
 
     try:
         master_loop(parent_conn, shm, child)

@@ -104,7 +104,7 @@ class QueueDepthMonitor:
         if qd > self.ALARM_THRESHOLD:
             self._alarm_count += 1
             self._consecutive_alarms += 1
-            logger.warning("[QDEPTH ALARM] depth=%d consecutive=%d total=%d max_seen=%d",
+            logger.warning("[QDEPTH ALARM] depth={} consecutive={} total={} max_seen={}",
                            qd, self._consecutive_alarms, self._alarm_count, self._max_depth_seen)
         else:
             self._consecutive_alarms = 0
@@ -214,7 +214,7 @@ class DutyCycleCollector:
         if self._window_max_qdepth >= 0:
             qdepth_str = f"  q_max={self._window_max_qdepth}"
 
-        logger.log(PERF, "[DUTY/%d] %s: mean=%.1fms p95=%.1fms max=%.1fms util=%.0f%%%s%s",
+        logger.log(PERF, "[DUTY/{}] {}: mean={:.1f}ms p95={:.1f}ms max={:.1f}ms util={:.0f}%{}{}",
                    self._total_frames, phase_lbl, mean, p95, mx, util,
                    arrival_str, qdepth_str)
 
@@ -316,7 +316,7 @@ class DutyCycleEntry(FrameProcessor):
         sr = getattr(frame, 'sample_rate', '?')
         ch = getattr(frame, 'num_channels', '?')
         dur = f"{samples / sr * 1000:.1f}ms" if isinstance(sr, (int, float)) and sr > 0 else "?"
-        logger.debug("[DUTY] first audio frame: %d bytes, %d samples, sr=%s Hz, ch=%s, duration=%s",
+        logger.debug("[DUTY] first audio frame: {} bytes, {} samples, sr={} Hz, ch={}, duration={}",
                      audio_bytes, samples, sr, ch, dur)
 
 
@@ -397,12 +397,12 @@ class GatedVADProcessor(FrameProcessor):
 
         @self._vad_controller.event_handler("on_speech_started")
         async def on_speech_started(_controller):
-            logger.info("[VAD] speech_started (after %d frames)", self.state.vad_frame_count)
+            logger.info("[VAD] speech_started (after {} frames)", self.state.vad_frame_count)
             self.state.signal_vad_started()
 
         @self._vad_controller.event_handler("on_speech_stopped")
         async def on_speech_stopped(_controller):
-            logger.info("[VAD] speech_stopped (after %d frames)", self.state.vad_frame_count)
+            logger.info("[VAD] speech_stopped (after {} frames)", self.state.vad_frame_count)
             self.state.signal_vad_stopped()
 
         @self._vad_controller.event_handler("on_push_frame")
@@ -510,7 +510,7 @@ class OpenWakeWordProcessor(FrameProcessor):
                         and score > 0.5
                         and (current_time - self.last_detection_time)
                             > self.DEBOUNCE_SECONDS):
-                    logger.info("WAKE DETECTED -- '%s'  |  score: %.3f", wakeword, score)
+                    logger.info("WAKE DETECTED -- '{}'  |  score: {:.3f}", wakeword, score)
                     self.last_detection_time = current_time
                     self.state.signal_wake_detected(score, wakeword)
 
@@ -520,7 +520,7 @@ class OpenWakeWordProcessor(FrameProcessor):
         mean = sum(s) / n
         p95 = DutyCycleCollector._percentile(s, 0.95)
         mx = s[-1]
-        logger.log(PERF, "[OWW/%d] predict: n=%d mean=%.1fms p95=%.1fms max=%.1fms",
+        logger.log(PERF, "[OWW/{}] predict: n={} mean={:.1f}ms p95={:.1f}ms max={:.1f}ms",
                    self._predict_count, n, mean, p95, mx)
         self._window_predict_times.clear()
 
@@ -577,7 +577,7 @@ class AudioFrameWriter(FrameProcessor):
 
             if phase != self._last_phase:
                 if self._last_phase:
-                    logger.debug("[ring/write] phase %s→%s: wrote %d frames, write_pos=%d",
+                    logger.debug("[ring/write] phase {}→{}: wrote {} frames, write_pos={}",
                                  self._last_phase, phase, self._phase_frames, self.state.write_pos)
                 self._phase_frames = 0
                 self._last_phase = phase
@@ -589,7 +589,7 @@ class AudioFrameWriter(FrameProcessor):
             if self._phase_frames == 1 or self._phase_frames % self._LOG_INTERVAL == 0:
                 wp = self.state.write_pos
                 head = struct.unpack_from('<4h', frame.audio)
-                logger.log(TRACE, "[ring/write] phase=%s frame=%d write_pos=%d sample[0:4]=%s",
+                logger.log(TRACE, "[ring/write] phase={} frame={} write_pos={} sample[0:4]={}",
                            phase, self._phase_frames, wp, head)
 
         await self.push_frame(frame, direction)
@@ -681,10 +681,10 @@ async def recorder_child_main(pipe, shm_name: str) -> None:
         task = PipelineTask(pipeline)
 
         pipe.send({"cmd": "READY"})
-        logger.info("[child] queue depth monitor ENABLED (alarm threshold=%d)",
+        logger.info("[child] queue depth monitor ENABLED (alarm threshold={})",
                     QueueDepthMonitor.ALARM_THRESHOLD)
         if duty_collector:
-            logger.info("[child] duty cycle probe ENABLED (window=%d frames, budget=%.0fms)",
+            logger.info("[child] duty cycle probe ENABLED (window={} frames, budget={:.0f}ms)",
                         DUTY_CYCLE_WINDOW, FRAME_DURATION_MS)
 
         loop = asyncio.get_running_loop()
@@ -713,7 +713,7 @@ async def recorder_child_main(pipe, shm_name: str) -> None:
 
         def _on_signal(name):
             if not shutdown_initiated:
-                logger.info("[child] %s — initiating safe shutdown...", name)
+                logger.info("[child] {} — initiating safe shutdown...", name)
                 asyncio.create_task(_initiate_shutdown())
 
         loop.add_signal_handler(signal.SIGINT, lambda: _on_signal("SIGINT"))
@@ -733,7 +733,7 @@ async def recorder_child_main(pipe, shm_name: str) -> None:
                 await listener
             except asyncio.CancelledError:
                 pass
-            logger.info("[QDEPTH] max_depth_seen=%d total_alarms=%d",
+            logger.info("[QDEPTH] max_depth_seen={} total_alarms={}",
                         qdepth_monitor.max_depth_seen, qdepth_monitor._alarm_count)
             if duty_collector:
                 duty_collector.print_final_summary(wake_processor)

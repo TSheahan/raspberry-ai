@@ -160,7 +160,7 @@ def parse_stream_line(line: str) -> dict | None:
     try:
         return json.loads(line)
     except json.JSONDecodeError:
-        logger.debug("stream line is not valid JSON: %r", line[:120])
+        logger.debug("stream line is not valid JSON: {!r}", line[:120])
         return None
 
 
@@ -276,7 +276,7 @@ class CursorAgentSession(AgentSession):
         ]
         if resuming and self._session_id:
             agent_args.extend(["--resume", self._session_id])
-            logger.info("[agent] pre-spawning (resume %s...)", self._session_id[:8])
+            logger.info("[agent] pre-spawning (resume {}...)", self._session_id[:8])
         else:
             logger.info("[agent] pre-spawning (fresh session)")
 
@@ -294,7 +294,7 @@ class CursorAgentSession(AgentSession):
             bufsize=1,
             start_new_session=True,
         )
-        logger.debug("[agent] pid=%d workspace=%s model=%s",
+        logger.debug("[agent] pid={} workspace={} model={}",
                      self._process.pid, self._workspace, self._model)
 
     def run(self, transcript: str) -> Iterator[str]:
@@ -310,7 +310,7 @@ class CursorAgentSession(AgentSession):
         process = self._process
         assert process is not None
 
-        logger.debug("[agent] writing transcript to stdin (%d chars)", len(transcript))
+        logger.debug("[agent] writing transcript to stdin ({} chars)", len(transcript))
         try:
             process.stdin.write(transcript + "\n")
             process.stdin.close()
@@ -345,11 +345,11 @@ class CursorAgentSession(AgentSession):
                 duration_ms = result_event.get("duration_ms", 0)
                 usage = result_event.get("usage", {})
                 if result_event.get("is_error"):
-                    logger.error("[agent] is_error=true in result event: %s", final_result)
+                    logger.error("[agent] is_error=true in result event: {}", final_result)
                     process.wait()
                     self._process = None
                     raise AgentError(f"agent reported error: {final_result}")
-                logger.info("[agent] result ok  duration=%dms  out_tokens=%s  cache_read=%s",
+                logger.info("[agent] result ok  duration={}ms  out_tokens={}  cache_read={}",
                             duration_ms,
                             usage.get("outputTokens", "?"),
                             usage.get("cacheReadTokens", "?"))
@@ -369,7 +369,7 @@ class CursorAgentSession(AgentSession):
 
         if captured_session_id:
             self._on_turn_success(captured_session_id)
-            logger.debug("[agent] session_id=%s", captured_session_id[:8])
+            logger.debug("[agent] session_id={}", captured_session_id[:8])
 
         yield from _word_boundary_chunks(iter(raw_deltas))
 
@@ -378,12 +378,12 @@ class CursorAgentSession(AgentSession):
         if self._process is None:
             return
         if self._process.poll() is None:
-            logger.debug("[agent] terminating subprocess pid=%d", self._process.pid)
+            logger.debug("[agent] terminating subprocess pid={}", self._process.pid)
             self._process.terminate()
             try:
                 self._process.wait(timeout=3)
             except subprocess.TimeoutExpired:
-                logger.warning("[agent] terminate timed out — killing pid=%d",
+                logger.warning("[agent] terminate timed out — killing pid={}",
                                self._process.pid)
                 self._process.kill()
         self._process = None
