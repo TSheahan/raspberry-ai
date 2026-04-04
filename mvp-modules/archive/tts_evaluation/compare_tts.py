@@ -45,6 +45,7 @@ import argparse
 import os
 import sys
 import time
+import wave
 from pathlib import Path
 
 import pyaudio
@@ -104,6 +105,18 @@ def _open_stream(pa: pyaudio.PyAudio, sample_rate: int) -> pyaudio.Stream:
     )
 
 
+def _save_wav(path: Path, pcm_bytes: bytes, sample_rate: int) -> None:
+    """Write raw S16LE PCM bytes to a WAV file and print the aplay command."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with wave.open(str(path), "wb") as wf:
+        wf.setnchannels(1)
+        wf.setsampwidth(2)   # S16LE = 2 bytes per sample
+        wf.setframerate(sample_rate)
+        wf.writeframes(pcm_bytes)
+    logger.info("[wav] saved {} ({:.1f} KB)  ->  aplay {}", path, len(pcm_bytes) / 1024, path)
+    print(f"  aplay {path}")
+
+
 # ---------------------------------------------------------------------------
 # Deepgram backend
 # ---------------------------------------------------------------------------
@@ -114,6 +127,7 @@ def _run_deepgram_sentence(
     model: str,
     speed: float,
     pa: pyaudio.PyAudio,
+    save_path: Path | None = None,
 ) -> dict:
     """Synthesise `text` via Deepgram REST and play through device 0.
 
@@ -138,9 +152,12 @@ def _run_deepgram_sentence(
         encoding="linear16",
         request_options=opts,
     )
-    audio = b"".join(response)          # REST: join iterator → full PCM bytes
+    audio = b"".join(response)          # REST: join iterator -> full PCM bytes
     latency_ms = (time.monotonic() - t0) * 1000
     logger.info("[deepgram] {:>5.0f} ms  {:>6.1f} KB  {!r}", latency_ms, len(audio) / 1024, text[:60])
+
+    if save_path:
+        _save_wav(save_path, audio, DEEPGRAM_SAMPLE_RATE)
 
     stream = _open_stream(pa, DEEPGRAM_SAMPLE_RATE)
     try:
@@ -167,6 +184,8 @@ def _run_deepgram(
     model: str,
     speed: float,
     pa: pyaudio.PyAudio,
+    save_dir: Path | None = None,
+    sentence_offset: int = 0,
 ) -> list[dict]:
     from deepgram import DeepgramClient  # type: ignore[import]
 
@@ -179,8 +198,9 @@ def _run_deepgram(
     logger.info("[deepgram] starting  model={}  speed={}  sentences={}", model, speed, len(sentences))
 
     results = []
-    for text in sentences:
-        row = _run_deepgram_sentence(text, client, model, speed, pa)
+    for i, text in enumerate(sentences):
+        save_path = save_dir / f"deepgram_{sentence_offset + i:02d}.wav" if save_dir else None
+        row = _run_deepgram_sentence(text, client, model, speed, pa, save_path=save_path)
         if row:
             results.append(row)
     return results
@@ -197,6 +217,7 @@ def _run_cartesia_sentence(
     voice_id: str,
     sample_rate: int,
     pa: pyaudio.PyAudio,
+    save_path: Path | None = None,
 ) -> dict:
     """Synthesise `text` via Cartesia WebSocket and play through device 0.
 
@@ -217,6 +238,7 @@ def _run_cartesia_sentence(
     first_chunk_ms: float | None = None
     total_bytes = 0
 
+    pcm_buffer: list[bytes] = []
     stream = _open_stream(pa, sample_rate)
     ws = client.tts.websocket_connect()
     try:
@@ -238,10 +260,15 @@ def _run_cartesia_sentence(
                     logger.info("[cartesia] first chunk in {:.0f} ms", first_chunk_ms)
                 stream.write(audio)
                 total_bytes += len(audio)
+                if save_path:
+                    pcm_buffer.append(audio)
     finally:
         ws.close()
         stream.stop_stream()
         stream.close()
+
+    if save_path and pcm_buffer:
+        _save_wav(save_path, b"".join(pcm_buffer), sample_rate)
 
     total_ms = (time.monotonic() - t0) * 1000
     rss_peak = max(rss_before, _rss_mb())
@@ -266,6 +293,8 @@ def _run_cartesia(
     voice_id: str,
     sample_rate: int,
     pa: pyaudio.PyAudio,
+    save_dir: Path | None = None,
+    sentence_offset: int = 0,
 ) -> list[dict]:
     try:
         from cartesia import Cartesia  # type: ignore[import]
@@ -285,8 +314,9 @@ def _run_cartesia(
     logger.info("[cartesia] starting  model={}  voice={}  sentences={}", model, voice_id, len(sentences))
 
     results = []
-    for text in sentences:
-        row = _run_cartesia_sentence(text, client, model, voice_id, sample_rate, pa)
+    for i, text in enumerate(sentences):
+        save_path = save_dir / f"cartesia_{sentence_offset + i:02d}.wav" if save_dir else None
+        row = _run_cartesia_sentence(text, client, model, voice_id, sample_rate, pa, save_path=save_path)
         if row:
             results.append(row)
     return results
@@ -302,6 +332,7 @@ def _run_elevenlabs_sentence(
     voice_id: str,
     model: str,
     pa: pyaudio.PyAudio,
+    save_path: Path | None = None,
 ) -> dict:
     """Synthesise `text` via ElevenLabs convert_as_stream() and play through device 0.
 
@@ -321,6 +352,7 @@ def _run_elevenlabs_sentence(
     first_chunk_ms: float | None = None
     total_bytes = 0
 
+    pcm_buffer: list[bytes] = []
     stream = _open_stream(pa, ELEVENLABS_SAMPLE_RATE)
     try:
         audio_stream = client.text_to_speech.stream(
@@ -336,9 +368,14 @@ def _run_elevenlabs_sentence(
                     logger.info("[elevenlabs] first chunk in {:.0f} ms", first_chunk_ms)
                 stream.write(pcm_chunk)
                 total_bytes += len(pcm_chunk)
+                if save_path:
+                    pcm_buffer.append(pcm_chunk)
     finally:
         stream.stop_stream()
         stream.close()
+
+    if save_path and pcm_buffer:
+        _save_wav(save_path, b"".join(pcm_buffer), ELEVENLABS_SAMPLE_RATE)
 
     total_ms = (time.monotonic() - t0) * 1000
     rss_peak = max(rss_before, _rss_mb())
@@ -362,6 +399,8 @@ def _run_elevenlabs(
     voice_id: str,
     model: str,
     pa: pyaudio.PyAudio,
+    save_dir: Path | None = None,
+    sentence_offset: int = 0,
 ) -> list[dict]:
     try:
         from elevenlabs.client import ElevenLabs  # type: ignore[import]
@@ -378,8 +417,9 @@ def _run_elevenlabs(
     logger.info("[elevenlabs] starting  model={}  voice={}  sentences={}", model, voice_id, len(sentences))
 
     results = []
-    for text in sentences:
-        row = _run_elevenlabs_sentence(text, client, voice_id, model, pa)
+    for i, text in enumerate(sentences):
+        save_path = save_dir / f"elevenlabs_{sentence_offset + i:02d}.wav" if save_dir else None
+        row = _run_elevenlabs_sentence(text, client, voice_id, model, pa, save_path=save_path)
         if row:
             results.append(row)
     return results
@@ -459,6 +499,9 @@ def _parse_args() -> argparse.Namespace:
     only.add_argument("--cartesia-only", action="store_true", help="Run Cartesia only")
     p.add_argument("--sentence", dest="sentences", action="append", metavar="TEXT",
                    help="Test sentence (repeatable; replaces defaults)")
+    p.add_argument("--save-wav", metavar="DIR", nargs="?", const=".",
+                   help="Save each sentence as a WAV file for aplay diagnostics "
+                        "(default dir: current directory)")
     p.add_argument("--pause", type=float, default=2.0, metavar="SECS",
                    help="Pause between backends within a sentence (default: 2.0)")
     p.add_argument("--dg-model", default="aura-2-thalia-en", metavar="NAME",
@@ -485,6 +528,9 @@ def main() -> None:
     run_deepgram = args.deepgram_only or not (args.elevenlabs_only or args.cartesia_only)
     run_elevenlabs = args.elevenlabs_only or not (args.deepgram_only or args.cartesia_only)
     run_cartesia = args.cartesia_only or not (args.deepgram_only or args.elevenlabs_only)
+    save_dir = Path(args.save_wav) if args.save_wav else None
+    if save_dir:
+        logger.info("[wav] saving audio to {}/", save_dir.resolve())
 
     logger.info(
         "TTS comparison  sentences={}  deepgram={}  elevenlabs={}  cartesia={}",
@@ -501,7 +547,7 @@ def main() -> None:
             active_backends: list[str] = []
 
             if run_deepgram:
-                rows = _run_deepgram([text], model=args.dg_model, speed=args.dg_speed, pa=pa)
+                rows = _run_deepgram([text], model=args.dg_model, speed=args.dg_speed, pa=pa, save_dir=save_dir, sentence_offset=i)
                 all_results.extend(rows)
                 if rows:
                     active_backends.append("deepgram")
@@ -509,7 +555,7 @@ def main() -> None:
             if run_elevenlabs:
                 if active_backends:
                     time.sleep(args.pause)
-                rows = _run_elevenlabs([text], voice_id=args.el_voice_id, model=args.el_model, pa=pa)
+                rows = _run_elevenlabs([text], voice_id=args.el_voice_id, model=args.el_model, pa=pa, save_dir=save_dir, sentence_offset=i)
                 all_results.extend(rows)
                 if rows:
                     active_backends.append("elevenlabs")
@@ -523,6 +569,8 @@ def main() -> None:
                     voice_id=args.cartesia_voice_id,
                     sample_rate=args.cartesia_rate,
                     pa=pa,
+                    save_dir=save_dir,
+                    sentence_offset=i,
                 )
                 all_results.extend(rows)
 
