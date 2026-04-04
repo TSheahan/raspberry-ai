@@ -354,6 +354,17 @@ class CursorAgentSession(AgentSession):
                 delta = extract_delta_text(event)
                 logger.debug("[agent/evt] assistant has_ts={} text={!r}", has_ts, delta[:120])
                 if has_ts and delta:
+                    # Re-emission guard: after a tool call the CLI resends the
+                    # pre-tool text as a single timestamped delta. Signature:
+                    # buffer is empty (just cleared after a yield), something
+                    # was already yielded, and the delta exactly matches it.
+                    # Skip to avoid double-speaking the pre-tool sentence.
+                    if (not sentence_buffer
+                            and yielded_text
+                            and delta.strip() == yielded_text.strip()):
+                        logger.debug("[agent] re-emission detected — skipping: {!r}",
+                                     delta[:60])
+                        continue
                     delta_count += 1
                     sentence_buffer += delta
                     sentences, sentence_buffer = _flush_sentences(sentence_buffer)
