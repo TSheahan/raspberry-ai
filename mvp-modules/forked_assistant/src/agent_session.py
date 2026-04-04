@@ -30,6 +30,7 @@ See memory/agent_session_patterns.md for design rationale.
 
 import json
 import os
+import re
 import subprocess
 import time
 from abc import ABC, abstractmethod
@@ -77,10 +78,12 @@ class AgentSession(ABC):
 
     @abstractmethod
     def run(self, transcript: str) -> Iterator[str]:
-        """Feed transcript to the pre-spawned process; yield TTS-safe text chunks.
+        """Feed transcript to the pre-spawned process; yield TTS-safe sentence chunks.
 
         Writes transcript to stdin and closes it. Reads stdout, parses
-        stream-json events, and yields word-boundary-safe text chunks.
+        stream-json events, and yields sentence-boundary-safe text chunks live
+        as streaming deltas arrive. Any tail text not covered by live sentences
+        is yielded from result.result after the stream closes.
         Updates session_id and last_turn_time on success.
         Raises AgentError on subprocess failure or is_error result.
         If prepare() was not called, calls it internally before proceeding.
@@ -176,27 +179,30 @@ def extract_delta_text(event: AssistantEvent) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Word-boundary buffer
+# Sentence-boundary buffer
 # ---------------------------------------------------------------------------
 
-def _word_boundary_chunks(raw_deltas: Iterator[str]) -> Iterator[str]:
-    """Buffer raw delta text and yield only word-boundary-safe chunks.
+# Matches a sentence-ending punctuation mark followed by whitespace or
+# end-of-string. The look-ahead keeps the punctuation in the yielded chunk.
+_SENTENCE_BOUNDARY = re.compile(r'[.!?](?=\s|$)')
 
-    Holds the tail of each delta after the last whitespace until the next
-    delta arrives or the stream ends. Prevents a TTS engine from receiving
-    a fragment that the next delta may extend mid-word.
 
-    Treats both space and newline as flush boundaries.
+def _flush_sentences(buffer: str) -> tuple[list[str], str]:
+    """Extract all complete sentences from buffer; return (sentences, remainder).
+
+    A sentence ends at the first [.!?] followed by whitespace or end-of-string.
+    Leading whitespace is stripped from each sentence and from the remainder.
     """
-    buffer = ""
-    for delta in raw_deltas:
-        buffer += delta
-        last_ws = max(buffer.rfind(" "), buffer.rfind("\n"))
-        if last_ws >= 0:
-            yield buffer[:last_ws + 1]
-            buffer = buffer[last_ws + 1:]
-    if buffer:
-        yield buffer
+    sentences: list[str] = []
+    while True:
+        m = _SENTENCE_BOUNDARY.search(buffer)
+        if not m:
+            break
+        sentence = buffer[:m.end()].strip()
+        buffer = buffer[m.end():].lstrip()
+        if sentence:
+            sentences.append(sentence)
+    return sentences, buffer
 
 
 # ---------------------------------------------------------------------------
@@ -320,7 +326,14 @@ class CursorAgentSession(AgentSession):
 
         captured_session_id: str | None = None
         final_result: str | None = None
-        raw_deltas: list[str] = []
+        delta_count = 0
+
+        # Live sentence streaming state.
+        # sentence_buffer accumulates incoming delta text until a sentence
+        # boundary is found. yielded_text tracks everything already spoken
+        # so the end-of-stream tail logic can avoid double-speaking.
+        sentence_buffer = ""
+        yielded_text = ""
 
         for raw_line in process.stdout:
             event = parse_stream_line(raw_line)
@@ -341,15 +354,20 @@ class CursorAgentSession(AgentSession):
                 delta = extract_delta_text(event)
                 logger.debug("[agent/evt] assistant has_ts={} text={!r}", has_ts, delta[:120])
                 if has_ts and delta:
-                    raw_deltas.append(delta)
+                    delta_count += 1
+                    sentence_buffer += delta
+                    sentences, sentence_buffer = _flush_sentences(sentence_buffer)
+                    for sentence in sentences:
+                        yielded_text += sentence + " "
+                        yield sentence
 
             elif event_type == "result":
                 result_event: ResultEvent = event  # type: ignore[assignment]
                 final_result = result_event.get("result", "")
                 duration_ms = result_event.get("duration_ms", 0)
                 usage = result_event.get("usage", {})
-                logger.debug("[agent/evt] result is_error={} result_len={} deltas_accumulated={}",
-                             result_event.get("is_error"), len(final_result), len(raw_deltas))
+                logger.debug("[agent/evt] result is_error={} result_len={} deltas={}",
+                             result_event.get("is_error"), len(final_result), delta_count)
                 if result_event.get("is_error"):
                     logger.error("[agent] is_error=true in result event: {}", final_result)
                     process.wait()
@@ -380,18 +398,37 @@ class CursorAgentSession(AgentSession):
             self._on_turn_success(captured_session_id)
             logger.debug("[agent] session_id={}", captured_session_id[:8])
 
-        # Use result.result as the canonical text (per stream-json schema).
-        # raw_deltas accumulated above are for diagnostic delta-count logging only;
-        # yielding from them is unreliable when tool calls are involved because the
-        # CLI re-emits pre-tool-call text in a second set of timestamped deltas.
+        # Tail reconciliation against result.result (canonical ground truth).
+        #
+        # Three cases:
+        #   1. Normal: yielded_text is a clean prefix of result.result → yield tail.
+        #   2. Nothing yielded live (response too short to hit a sentence boundary,
+        #      or no timestamped deltas) → yield sentence_buffer then result.result.
+        #   3. Mismatch (tool-call re-emission shifted the delta text) → flush
+        #      sentence_buffer only; do not double-speak result.result.
         if final_result is not None:
-            logger.debug("[agent] yielding from result.result (len={} deltas={})",
-                         len(final_result), len(raw_deltas))
-            yield from _word_boundary_chunks(iter([final_result]))
-        elif raw_deltas:
-            logger.warning("[agent] no result event — falling back to {} accumulated deltas",
-                           len(raw_deltas))
-            yield from _word_boundary_chunks(iter(raw_deltas))
+            canonical = final_result.strip()
+            already = yielded_text.strip()
+            if already and canonical.startswith(already):
+                tail = canonical[len(already):].strip()
+                if tail:
+                    logger.debug("[agent] yielding tail ({} chars)", len(tail))
+                    yield tail
+                else:
+                    logger.debug("[agent] live sentences covered full result.result — no tail")
+            elif not already:
+                leftover = sentence_buffer.strip() or canonical
+                if leftover:
+                    logger.debug("[agent] no live sentences — yielding ({} chars)", len(leftover))
+                    yield leftover
+            else:
+                logger.debug("[agent] result.result mismatch — flushing buffer (re-emission?)")
+                if sentence_buffer.strip():
+                    yield sentence_buffer.strip()
+        elif sentence_buffer.strip():
+            logger.warning("[agent] no result event — flushing buffer ({} chars)",
+                           len(sentence_buffer))
+            yield sentence_buffer.strip()
 
     def close(self) -> None:
         """Terminate any live agent subprocess."""

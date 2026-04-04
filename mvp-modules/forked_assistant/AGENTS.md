@@ -88,11 +88,11 @@ Test files add `sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..',
 
 EU-7 proven 2026-04-04. Full pipeline run: "Tell me about the rules you know." → STT (0.45s) → CursorAgentSession (11.3s to result, 7.3s agent duration) → PiperTTS → audio through 3.5mm jack. Clean Ctrl+C from wake_listen. 2/8509 duty frames over budget (0.0%).
 
-Two quality items remain:
+One quality item remains:
 
-1. **`agent_session.py` live-sentence streaming** (in-progress) — currently `run()` yields from `result.result` at end-of-stream; TTS starts 11.3s after VAD_STOPPED. Live sentence chunks (buffering to `[.!?]` boundaries) will bring first audio down to ~2s after VAD_STOPPED. Replace `_word_boundary_chunks` with `_sentence_chunks`; yield tail from `result.result` after stream ends.
+1. **Markdown stripping** (done — `tts.py`) — agent responses containing `**bold**` were read as "asterisk asterisk bold asterisk asterisk" by Piper. `_strip_markdown()` in `tts.py` now removes bold/italic, headers, list bullets, and inline code before synthesis.
 
-2. **Markdown stripping** (done — `tts.py`) — agent responses containing `**bold**` were read as "asterisk asterisk bold asterisk asterisk" by Piper. `_strip_markdown()` in `tts.py` now removes bold/italic, headers, list bullets, and inline code before synthesis.
+**Live-sentence streaming done** (`agent_session.py`) — `run()` now yields sentence chunks live as streaming deltas arrive (`_flush_sentences()` buffers to `[.!?]` boundaries). Tail reconciliation against `result.result` handles three cases: normal prefix match (yield tail), nothing yielded live (yield full canonical), tool-call re-emission mismatch (flush buffer only). First audio expected ~2s after VAD_STOPPED on the next Pi run.
 
 **Response brevity** is the remaining latency lever: a 173-token 4-point list produces ~54s of audio. The agent has a voice-interface rule but didn't apply it strongly here. This is a persona/prompt tuning concern, not a pipeline code issue.
 
