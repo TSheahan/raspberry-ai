@@ -94,8 +94,8 @@ stream = pa.open(
     output=True,
     output_device_index=0,
 )
-for audio_bytes in voice.synthesize_stream_raw("Piper TTS is ready."):
-    stream.write(audio_bytes)
+for chunk in voice.synthesize("Piper TTS is ready."):
+    stream.write(chunk.audio_int16_bytes)
 stream.stop_stream()
 stream.close()
 pa.terminate()
@@ -103,6 +103,10 @@ print("smoke test ok")
 EOF
 # Expected: audible speech through 3.5mm jack; "smoke test ok" printed
 ```
+
+`piper-tts` 1.4.x uses `PiperVoice.synthesize()` returning `AudioChunk` values; use
+`chunk.audio_int16_bytes` for PyAudio. Older docs referred to `synthesize_stream_raw`,
+which is not present on current releases.
 
 ---
 
