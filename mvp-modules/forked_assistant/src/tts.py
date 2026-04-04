@@ -10,10 +10,10 @@ Usage (from master.py):
     tts.close()                       # call once at process exit
 
 Architecture note:
-    Piper's synthesize_stream_raw() accepts a text string, splits it into
-    sentences internally via piper-phonemize, and yields one bytes blob per
-    sentence. play() opens a single PyAudio stream for the full turn and writes
-    sentence blobs as they arrive.
+    PiperVoice.synthesize() (piper-tts 1.4.x) accepts a text string and yields
+    AudioChunk objects. Each chunk's audio_int16_bytes is written directly to the
+    PyAudio output stream. play() opens one stream for the full turn and closes
+    it when the iterator is exhausted.
 
     OWW is gated off during TTS playback: master sends SET_IDLE before the
     cognitive loop (which includes TTS) and SET_WAKE_LISTEN only after it
@@ -76,9 +76,10 @@ class PiperTTS:
                              len(chunk), chunk[:80])
                 t0 = _monotonic()
                 bytes_written = 0
-                for audio_bytes in self._voice.synthesize_stream_raw(chunk):
-                    stream.write(audio_bytes)
-                    bytes_written += len(audio_bytes)
+                for audio_chunk in self._voice.synthesize(chunk):
+                    pcm = audio_chunk.audio_int16_bytes
+                    stream.write(pcm)
+                    bytes_written += len(pcm)
                 logger.debug("[tts] played {:.0f}ms of audio ({} bytes) in {:.0f}ms",
                              bytes_written / (self._sample_rate * 2) * 1000,
                              bytes_written,

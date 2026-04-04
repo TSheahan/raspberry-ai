@@ -1,5 +1,5 @@
 """
-master.py — Master process for the forked assistant (EU-5/EU-6: streaming).
+master.py — Master process for the forked assistant (EU-5/EU-6/EU-7: streaming + TTS).
 
 Main entry point. Creates SharedMemory and Pipe, spawns the recorder child
 on core 0, then runs a synchronous event loop that:
@@ -9,16 +9,17 @@ on core 0, then runs a synchronous event loop that:
   3. On WAKE_DETECTED: pre-spawns agent subprocess (EU-6) + opens Deepgram
      live WebSocket + starts ring-tail thread (EU-5) concurrently; sends SET_CAPTURE
   4. On VAD_STOPPED: stops ring-tail, finalizes Deepgram stream, assembles
-     transcript, calls agent.run() for streaming text output
+     transcript, calls agent.run() → tts.play() for speech output (EU-7)
   5. On response complete: sends SET_WAKE_LISTEN
   6. Handles Ctrl+C → SHUTDOWN sequence
 
 STT: Deepgram Nova-3 live WebSocket (Mixed mode — Silero VAD is authoritative
 dispatch trigger; Deepgram streams in parallel and accumulates is_final results).
 Agent: CursorAgentSession (~/.local/bin/agent, stream-json, session continuity).
+TTS: PiperTTS (Piper ONNX, bcm2835 headphones, device 0).
 
 Dependencies not in requirements.txt (already installed on Pi venv):
-  deepgram-sdk, python-dotenv
+  deepgram-sdk, python-dotenv, piper-tts
 
 Usage (on Pi with ReSpeaker):
     cd ~/raspberry-ai/mvp-modules/forked_assistant
@@ -46,6 +47,7 @@ from deepgram.core.events import EventType
 from log_config import configure_logging
 from agent_session import AgentSession, CursorAgentSession, AgentError
 from recorder_child import recorder_child_entry
+from tts import PiperTTS
 from ring_buffer import (
     CHANNELS, SAMPLE_RATE,
     SHM_NAME, SHM_SIZE,
@@ -58,6 +60,11 @@ logger = logger.bind(name="master")
 _AGENT_WORKSPACE = Path(os.environ.get("AGENT_WORKSPACE", str(Path.home() / "raspberry-ai")))
 _AGENT_MODEL = os.environ.get("AGENT_MODEL", "claude-4.6-sonnet-medium")
 _AGENT_BIN = Path(os.environ.get("AGENT_BIN", str(Path.home() / ".local/bin/agent")))
+
+# --- TTS configuration (override via environment) ---
+_PIPER_MODEL_PATH = Path(os.path.expanduser(
+    os.environ.get("PIPER_MODEL_PATH", "~/piper-models/en_US-lessac-medium.onnx")
+))
 
 # Deepgram keepalive: send every N seconds when ring write_pos has not advanced.
 # Deepgram closes the WebSocket with NET-0001 after 10 s of silence.
@@ -178,20 +185,18 @@ def _run_capture(
 
 
 # ---------------------------------------------------------------------------
-# Cognitive loop — agent response (EU-6)
+# Cognitive loop — agent response + TTS output (EU-6/EU-7)
 # ---------------------------------------------------------------------------
 
-def cognitive_loop(transcript: str, agent: AgentSession) -> None:
-    """Feed transcript to agent; print streaming text chunks as they arrive."""
+def cognitive_loop(transcript: str, agent: AgentSession, tts: PiperTTS) -> None:
+    """Feed transcript to agent; synthesise and play each yielded sentence chunk."""
     if not transcript:
         logger.warning("no transcript — skipping cognitive loop")
         return
     logger.info("TRANSCRIPT: {}", transcript)
     loop_start = time.monotonic()
     try:
-        for text_chunk in agent.run(transcript):
-            print(text_chunk, end="", flush=True)
-        print()
+        tts.play(agent.run(transcript))
     except AgentError as exc:
         logger.error("[agent] error: {}", exc)
     logger.info("cognitive loop latency: {:.2f}s", time.monotonic() - loop_start)
@@ -255,6 +260,7 @@ def master_loop(pipe, shm: SharedMemory, child: Process) -> None:
         model=_AGENT_MODEL,
         agent_bin=_AGENT_BIN,
     )
+    tts = PiperTTS(_PIPER_MODEL_PATH)
     processing = False
     wake_pos = 0
     capture: _CaptureSession | None = None
@@ -313,7 +319,7 @@ def master_loop(pipe, shm: SharedMemory, child: Process) -> None:
                 pipe.send({"cmd": "SET_IDLE"})
                 processing = True
                 try:
-                    cognitive_loop(transcript, agent)
+                    cognitive_loop(transcript, agent, tts)
                 except Exception as exc:
                     logger.error("cognitive loop error: {}", exc)
                 finally:
@@ -333,6 +339,7 @@ def master_loop(pipe, shm: SharedMemory, child: Process) -> None:
 
     finally:
         agent.close()
+        tts.close()
         if capture is not None:
             capture.stop_event.set()
             if capture.thread is not None:

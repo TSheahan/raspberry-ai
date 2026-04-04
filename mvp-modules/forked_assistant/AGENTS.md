@@ -29,7 +29,7 @@ forked_assistant/
 │   ├── recorder_child.py         ← EU-3d: merged recorder subprocess (RecorderChild + Pipecat pipeline)
 │   ├── agent_session.py          ← EU-6: AgentSession base + CursorAgentSession implementation
 │   ├── tts.py                    ← EU-7: PiperTTS wrapper (Piper ONNX + PyAudio device 0)
-│   └── master.py                 ← EU-4: master process — batch-mode cognitive loop
+│   └── master.py                 ← EU-5/EU-6/EU-7: streaming STT + agent + TTS
 ├── test/              ← harnesses and smoke tests
 │   ├── smoke_test_shm.py         ← EU-1+EU-2: SharedMemory and ring buffer IPC tests
 │   ├── track1_ipc_harness.py     ← EU-3b: fork + real SHM/pipe, FakeAudioDriver
@@ -56,6 +56,7 @@ forked_assistant/
 | EU-4 | Master process — batch mode (STT + Claude) | Complete (`src/master.py`, proven 2026-04-03) |
 | EU-5 | Streaming STT — Deepgram live WebSocket + ring buffer tail | Complete (`src/master.py`, proven 2026-04-04) |
 | EU-6 | Agent module — `AgentSession` abstraction + `CursorAgentSession` (Cursor CLI) | Complete (`src/agent_session.py`, integrated in `src/master.py`, proven 2026-04-04) |
+| EU-7 | TTS — `PiperTTS` wrapper + `master.py` integration | Code written (`src/tts.py`, `src/master.py`); `agent_session.py` live-sentence refactor in-progress; Pi validation pending |
 
 EU-3b and EU-3c are **parallel tracks** that can be developed independently. EU-3d merges them.
 
@@ -83,17 +84,21 @@ Test files add `sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..',
 
 ## What's Next
 
-### Step 8 — TTS → audio output (EU-7, in progress)
+### Step 8 — TTS → audio output (EU-7, Pi validation pending)
 
-`src/tts.py` is written (`PiperTTS` — Piper ONNX + PyAudio device 0). Two changes remain before step 8 is ready for Pi validation:
+`src/tts.py` and `src/master.py` are complete. One change remains before Pi validation:
 
-1. **`agent_session.py`** — refactor `run()` to yield sentence chunks live from streaming deltas (replacing the current end-of-stream batch yield). Replace `_word_boundary_chunks` with `_sentence_chunks` that buffers to `[.!?]` boundaries. Track `yielded_text`; yield tail from `result.result` after the stream ends.
+1. **`agent_session.py`** — refactor `run()` to yield sentence chunks live from streaming deltas (in-progress). Replace `_word_boundary_chunks` with `_sentence_chunks` that buffers to `[.!?]` boundaries. Track `yielded_text`; yield tail from `result.result` after the stream ends. This enables TTS to start playing the first sentence while the agent is still generating subsequent ones.
 
-2. **`master.py`** — import `PiperTTS`; add `_PIPER_MODEL_PATH` env var (default `~/piper-models/en_US-lessac-medium.onnx`); instantiate in `master_loop` alongside agent/DG; update `cognitive_loop` to accept and call `tts.play(agent.run(transcript))`; add `tts.close()` to the `finally` block.
+Once `agent_session.py` is updated, Pi validation checklist:
+- `piper-tts` installed in venv (`pip show piper-tts`)
+- `en_US-lessac-medium.onnx` + `.json` present at `~/piper-models/` (see `profiling-pi/piper-tts-setup.md`)
+- `PIPER_MODEL_PATH` set in `.env` or environment (default path is `~/piper-models/en_US-lessac-medium.onnx`)
+- Run a full wake → utterance → STT → agent → TTS turn; confirm audio plays on the 3.5mm jack
+- Measure total turn latency (end-of-utterance → first audio sample); target < 6 s
+- Record Piper CPU during synthesis (target < 50%); watch for cross-process OWW/Piper ONNX concurrency load
 
-Pi provisioning before first run: `profiling-pi/piper-tts-setup.md`.
-
-OWW barge-in is already protected: `SET_IDLE` is sent before `cognitive_loop` and `SET_WAKE_LISTEN` only after it returns — TTS runs entirely in the idle window. OWW inference is gated to `wake_listen` phase only (`recorder_child.py` line 466). No additional gate needed. Cross-process Piper/OWW ONNX concurrency (separate processes, separate pinned cores) is a Pi validation item — watch duty-cycle reports during first TTS run.
+OWW barge-in is already protected: `SET_IDLE` is sent before `cognitive_loop` and `SET_WAKE_LISTEN` only after it returns — TTS runs entirely in the idle window. OWW inference is gated to `wake_listen` phase only (`recorder_child.py` line 466). No additional gate needed.
 
 ## Completed Effort Units
 
