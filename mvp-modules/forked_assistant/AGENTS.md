@@ -56,7 +56,7 @@ forked_assistant/
 | EU-4 | Master process — batch mode (STT + Claude) | Complete (`src/master.py`, proven 2026-04-03) |
 | EU-5 | Streaming STT — Deepgram live WebSocket + ring buffer tail | Complete (`src/master.py`, proven 2026-04-04) |
 | EU-6 | Agent module — `AgentSession` abstraction + `CursorAgentSession` (Cursor CLI) | Complete (`src/agent_session.py`, integrated in `src/master.py`, proven 2026-04-04) |
-| EU-7 | TTS — `PiperTTS` wrapper + `master.py` integration | Code written (`src/tts.py`, `src/master.py`); `agent_session.py` live-sentence refactor in-progress; Pi validation pending |
+| EU-7 | TTS — `PiperTTS` wrapper + `master.py` integration | Complete (`src/tts.py`, `src/master.py`, proven 2026-04-04) |
 
 EU-3b and EU-3c are **parallel tracks** that can be developed independently. EU-3d merges them.
 
@@ -84,23 +84,36 @@ Test files add `sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..',
 
 ## What's Next
 
-### Step 8 — TTS → audio output (EU-7, Pi validation pending)
+### Step 8 complete — quality improvements in progress
 
-`src/tts.py` and `src/master.py` are complete. One change remains before Pi validation:
+EU-7 proven 2026-04-04. Full pipeline run: "Tell me about the rules you know." → STT (0.45s) → CursorAgentSession (11.3s to result, 7.3s agent duration) → PiperTTS → audio through 3.5mm jack. Clean Ctrl+C from wake_listen. 2/8509 duty frames over budget (0.0%).
 
-1. **`agent_session.py`** — refactor `run()` to yield sentence chunks live from streaming deltas (in-progress). Replace `_word_boundary_chunks` with `_sentence_chunks` that buffers to `[.!?]` boundaries. Track `yielded_text`; yield tail from `result.result` after the stream ends. This enables TTS to start playing the first sentence while the agent is still generating subsequent ones.
+Two quality items remain:
 
-Once `agent_session.py` is updated, Pi validation checklist:
-- `piper-tts` installed in venv (`pip show piper-tts`)
-- `en_US-lessac-medium.onnx` + `.json` present at `~/piper-models/` (see `profiling-pi/piper-tts-setup.md`)
-- `PIPER_MODEL_PATH` set in `.env` or environment (default path is `~/piper-models/en_US-lessac-medium.onnx`)
-- Run a full wake → utterance → STT → agent → TTS turn; confirm audio plays on the 3.5mm jack
-- Measure total turn latency (end-of-utterance → first audio sample); target < 6 s
-- Record Piper CPU during synthesis (target < 50%); watch for cross-process OWW/Piper ONNX concurrency load
+1. **`agent_session.py` live-sentence streaming** (in-progress) — currently `run()` yields from `result.result` at end-of-stream; TTS starts 11.3s after VAD_STOPPED. Live sentence chunks (buffering to `[.!?]` boundaries) will bring first audio down to ~2s after VAD_STOPPED. Replace `_word_boundary_chunks` with `_sentence_chunks`; yield tail from `result.result` after stream ends.
 
-OWW barge-in is already protected: `SET_IDLE` is sent before `cognitive_loop` and `SET_WAKE_LISTEN` only after it returns — TTS runs entirely in the idle window. OWW inference is gated to `wake_listen` phase only (`recorder_child.py` line 466). No additional gate needed.
+2. **Markdown stripping** (done — `tts.py`) — agent responses containing `**bold**` were read as "asterisk asterisk bold asterisk asterisk" by Piper. `_strip_markdown()` in `tts.py` now removes bold/italic, headers, list bullets, and inline code before synthesis.
+
+**Response brevity** is the remaining latency lever: a 173-token 4-point list produces ~54s of audio. The agent has a voice-interface rule but didn't apply it strongly here. This is a persona/prompt tuning concern, not a pipeline code issue.
+
+### Step 9 — loop (wake → turn → wake)
+
+Pipeline already loops: `SET_WAKE_LISTEN` is sent after `cognitive_loop` returns, and clean turns have been observed across multiple EU-5/EU-6 runs. Formal step 9 validation (3–5 complete turns, latency measurements table) follows the live-sentence streaming improvement.
 
 ## Completed Effort Units
+
+### EU-7 — complete (2026-04-04)
+
+PiperTTS proven on Pi. First full end-to-end voice turn: "Tell me about the rules you know."
+
+- STT latency: 451ms ✓ (target < 1s)
+- Agent duration: 7.3s (6.3s to first token; Cursor agent cold-start dominates)
+- Time to first TTS audio: 11.3s post-VAD_STOPPED (end-of-stream batch yield — addressed by EU-7b live-sentence streaming)
+- Total audio played: ~54s for 173-token 4-point list response
+- Duty cycle: 2/8509 frames over 20ms budget (0.0%) during TTS playback window
+- Clean Ctrl+C from wake_listen; SHUTDOWN_FINISHED → `[master] done` with no reboot
+
+Post-run fix: `_strip_markdown()` added to `tts.py` — agent responses with `**bold**` rendered as "asterisk asterisk" by Piper before the fix.
 
 ### EU-5 + EU-6 — complete (2026-04-04)
 

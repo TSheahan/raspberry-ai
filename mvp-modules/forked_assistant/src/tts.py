@@ -21,6 +21,7 @@ Architecture note:
 """
 
 import os
+import re
 from collections.abc import Iterator
 from pathlib import Path
 
@@ -69,7 +70,7 @@ class PiperTTS:
         )
         try:
             for chunk in text_chunks:
-                chunk = chunk.strip()
+                chunk = _strip_markdown(chunk)
                 if not chunk:
                     continue
                 logger.debug("[tts] synthesising chunk ({} chars): {!r}",
@@ -97,6 +98,29 @@ class PiperTTS:
 # ---------------------------------------------------------------------------
 # Internal helpers
 # ---------------------------------------------------------------------------
+
+def _strip_markdown(text: str) -> str:
+    """Remove markdown syntax that Piper would read as literal characters.
+
+    Handles the common patterns that appear in agent responses: bold/italic
+    markers, headers, list bullets, and inline code spans. Preserves the
+    underlying words so speech is unaffected beyond dropping the symbols.
+    """
+    # Bold/italic: **text**, *text*, __text__, _text_
+    text = re.sub(r'\*\*(.+?)\*\*', r'\1', text, flags=re.DOTALL)
+    text = re.sub(r'\*(.+?)\*', r'\1', text, flags=re.DOTALL)
+    text = re.sub(r'__(.+?)__', r'\1', text, flags=re.DOTALL)
+    text = re.sub(r'_(.+?)_', r'\1', text, flags=re.DOTALL)
+    # ATX headers: "## Heading"
+    text = re.sub(r'^#{1,6}\s+', '', text, flags=re.MULTILINE)
+    # Numbered list markers: "1. " at line start
+    text = re.sub(r'^\d+\.\s+', '', text, flags=re.MULTILINE)
+    # Bullet list markers: "- " or "* " at line start
+    text = re.sub(r'^[-*]\s+', '', text, flags=re.MULTILINE)
+    # Inline code: `code`
+    text = re.sub(r'`([^`]+)`', r'\1', text)
+    return text.strip()
+
 
 def _monotonic() -> float:
     import time
