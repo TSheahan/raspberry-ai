@@ -58,13 +58,15 @@ def _format(record: dict) -> str:
 
     Uses the stdlib logger name (stored in extra["name"] by _InterceptHandler)
     for our own code. Falls back to the loguru module name for Pipecat's own
-    direct loguru calls, which don't bind extra["name"].
+    direct loguru calls, which don't bind extra["name"]. Includes
+    {function}:{line} matching loguru's default format exactly.
     """
     name = record["extra"].get("name", record["name"])
     return (
         "<green>{time:YYYY-MM-DD HH:mm:ss.SSS}</green> | "
         "<level>{level: <8}</level> | "
-        f"<cyan>{name}</cyan> - <level>{{message}}</level>\n{{exception}}"
+        f"<cyan>{name}</cyan>:<cyan>{{function}}</cyan>:<cyan>{{line}}</cyan>"
+        " - <level>{message}</level>\n{exception}"
     )
 
 
@@ -77,14 +79,14 @@ def configure_logging(default_level: str = "INFO") -> None:
 
     Must be called once per process, before any logging calls are made.
     """
-    _custom = {"TRACE": TRACE, "PERF": PERF}
     level_name = os.environ.get("LOG_LEVEL", default_level).upper()
-    level = _custom.get(level_name, getattr(logging, level_name, logging.INFO))
 
     # Replace loguru's default sink with one filtered to our level.
+    # Loguru resolves "TRACE", "PERF", "DEBUG" etc. against its registered
+    # levels (PERF was added above); raises ValueError for unknown names.
     # colorize=None: auto-detect TTY (colors in terminal, plain when piped).
     logger.remove()
-    logger.add(sys.stderr, level=level, format=_format)
+    logger.add(sys.stderr, level=level_name, format=_format)
 
     # Route all stdlib logging into loguru. level=0 passes everything through;
     # filtering happens in the loguru sink above.
