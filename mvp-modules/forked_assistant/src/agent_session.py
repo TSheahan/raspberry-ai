@@ -328,15 +328,19 @@ class CursorAgentSession(AgentSession):
                 continue
 
             event_type = event.get("type")
+            has_ts = "timestamp_ms" in event
+            short_sid = (event.get("session_id") or "")[:8] or "-"
+            logger.debug("[agent/evt] type={!r} has_ts={} sid={}", event_type, has_ts, short_sid)
 
             # Capture session_id from any event
             sid = event.get("session_id")
             if sid:
                 captured_session_id = sid
 
-            if event_type == "assistant" and "timestamp_ms" in event:
+            if event_type == "assistant":
                 delta = extract_delta_text(event)
-                if delta:
+                logger.debug("[agent/evt] assistant has_ts={} text={!r}", has_ts, delta[:120])
+                if has_ts and delta:
                     raw_deltas.append(delta)
 
             elif event_type == "result":
@@ -344,6 +348,8 @@ class CursorAgentSession(AgentSession):
                 final_result = result_event.get("result", "")
                 duration_ms = result_event.get("duration_ms", 0)
                 usage = result_event.get("usage", {})
+                logger.debug("[agent/evt] result is_error={} result_len={} deltas_accumulated={}",
+                             result_event.get("is_error"), len(final_result), len(raw_deltas))
                 if result_event.get("is_error"):
                     logger.error("[agent] is_error=true in result event: {}", final_result)
                     process.wait()
@@ -353,6 +359,9 @@ class CursorAgentSession(AgentSession):
                             duration_ms,
                             usage.get("outputTokens", "?"),
                             usage.get("cacheReadTokens", "?"))
+
+            else:
+                logger.debug("[agent/evt] ignored type={!r}", event_type)
 
         process.wait()
         self._process = None
@@ -371,7 +380,18 @@ class CursorAgentSession(AgentSession):
             self._on_turn_success(captured_session_id)
             logger.debug("[agent] session_id={}", captured_session_id[:8])
 
-        yield from _word_boundary_chunks(iter(raw_deltas))
+        # Use result.result as the canonical text (per stream-json schema).
+        # raw_deltas accumulated above are for diagnostic delta-count logging only;
+        # yielding from them is unreliable when tool calls are involved because the
+        # CLI re-emits pre-tool-call text in a second set of timestamped deltas.
+        if final_result is not None:
+            logger.debug("[agent] yielding from result.result (len={} deltas={})",
+                         len(final_result), len(raw_deltas))
+            yield from _word_boundary_chunks(iter([final_result]))
+        elif raw_deltas:
+            logger.warning("[agent] no result event — falling back to {} accumulated deltas",
+                           len(raw_deltas))
+            yield from _word_boundary_chunks(iter(raw_deltas))
 
     def close(self) -> None:
         """Terminate any live agent subprocess."""
