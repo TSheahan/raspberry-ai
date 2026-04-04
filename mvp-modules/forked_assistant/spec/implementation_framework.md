@@ -302,7 +302,7 @@ Remaining validation before step 7 closes: (1) confirm Claude response text prin
 - `agent.prepare()` called synchronously on `WAKE_DETECTED` (Popen is non-blocking; returns immediately).
 - `cognitive_loop(transcript, agent)` replaces the old `cognitive_loop(audio_bytes, dg_client)`. Prints text chunks from `agent.run()` incrementally.
 - Batch STT (`transcribe()`, `run_claude()`, `stub_claude()`, `_save_wav_debug()`) removed.
-- Pi validation required before marking EU-5 and EU-6 complete.
+- **EU-5 proven on Pi (2026-04-04).** Three runs: Deepgram WebSocket connected, `is_final` accumulated, KeepAlive fired (no NET-0001), full transcript delivered to cognitive loop. See `AGENTS.md` — EU-5+EU-6 completed section for run data.
 
 ---
 
@@ -346,9 +346,33 @@ stdin receives the transcript; stdout is a stream of newline-delimited JSON even
 
 **Known regression:** Claude CLI `-p` with `subprocess.run` has a known empty-stdout regression (v2.1.83). Cursor CLI via `stream-json` / `Popen` is not affected.
 
-**Status:** `src/agent_session.py` is written. Pi integration is complete in `src/master.py` (2026-04-04) — `prepare()` is called on WAKE_DETECTED and `run()` drives the cognitive loop. Pi validation is the remaining step.
+**Status:** `src/agent_session.py` written. Pi integration complete in `src/master.py` (2026-04-04). **EU-6 proven on Pi (2026-04-04)** — `prepare()` pre-spawn, `run()` streaming deltas, session resume across turns, privilege separation (`AGENT_USER=agent` via `sudo -u agent -H`) all confirmed. See `AGENTS.md` — EU-5+EU-6 completed section for full run data.
+
+**Privilege separation (added post-spec):** Cursor CLI subprocess runs as dedicated `agent` Linux user. Voice assistant processes run as `user`. Sudoers entry is narrow: `user ALL=(agent) NOPASSWD: /home/agent/.local/bin/agent`. `AGENT_USER`, `AGENT_BIN`, `AGENT_WORKSPACE` control this at runtime. Design rationale: `archive/2026-04-04_privilege_separation_analysis.md`.
 
 **Estimated scope:** ~160 lines (`agent_session.py` written). Pi integration ~30 lines in `master.py`.
+
+---
+
+### EU-7: TTS — PiperTTS + Live-Sentence Streaming
+
+**Goal:** Synthesise agent response audio from the text iterator produced by EU-6, with sentence-level streaming to minimise time-to-first-audio.
+
+**Deliverables:**
+- `src/tts.py` — `PiperTTS` class: Piper ONNX synthesis, PyAudio output (device 0), `_strip_markdown()` pre-filter (strips `**bold**`, headers, list bullets, inline code before synthesis)
+- `src/agent_session.py` — `_flush_sentences()` live-sentence streaming in `run()`, with tail reconciliation against `result.result` (three cases: prefix match, nothing yielded live, tool-call re-emission mismatch)
+- `src/master.py` — integration: `cognitive_loop` iterates `agent.run(transcript)` through `tts.play()`
+
+**EU-7 proven on Pi (2026-04-04):**
+- STT latency: 451 ms ✓ (target < 1 s)
+- Agent duration: 7.3 s (6.3 s to first token; Cursor agent cold-start dominates)
+- Time to first TTS audio: 11.3 s post-VAD_STOPPED (end-of-stream batch yield — addressed by EU-7b live-sentence streaming)
+- Total audio played: ~54 s for 173-token 4-point list response
+- Duty cycle: 2/8509 frames over 20 ms budget (0.0%); clean Ctrl+C from wake_listen
+
+**EU-7b — Live-sentence streaming (proven 2026-04-04):** `run()` yields sentence chunks live as streaming deltas arrive; first audio expected ~2 s after VAD_STOPPED. Tail reconciliation handles three cases.
+
+**Blocking issue — step 8 delivery:** PiperTTS is unsuitable on 1 GB Pi 4. The kernel OOM-killed `master.py` during synthesis (`en_US-lessac-medium`, ~63 MB ONNX; 317 MB RSS + 385 MB swap = ~700 MB footprint against 900 MB total swap). Audio tearing was also observed before the kill. Off-device TTS rearchitecture is required. See `archive/2026-04-05_open_items.md` item 1 for candidate options (ElevenLabs, Cartesia, Deepgram Aura, Kokoro) and the interface contract: any implementation that accepts an `Iterator[str]` and plays audio satisfies the existing `tts.play()` call site in `master.py`.
 
 ---
 
@@ -359,10 +383,12 @@ stdin receives the transcript; stdout is a stream of newline-delimited JSON even
 1. ✓ Wake → capture → VAD cycle stable (EU-3d, EU-4)
 2. ✓ Ring buffer span read correct, STT produces transcript (EU-4 runs 2–3)
 3. ✓ Shutdown clean from any state, no Pi reboot (EU-4 run 3)
-4. ☐ Claude response text printed on a full turn (EU-4 validation run)
-5. ☐ Multi-turn: 3–5 consecutive turns without degradation (EU-4 validation run)
-6. ☐ Streaming STT via Deepgram live WebSocket (EU-5)
-7. ☐ Streaming Claude response with incremental text output (EU-6)
+4. ✓ Claude response text printed on a full turn (EU-5/EU-6 runs, 2026-04-04)
+5. ✓ Multi-turn: 3–5 consecutive turns without degradation (EU-5/EU-6 — 3 runs, loop confirmed)
+6. ✓ Streaming STT via Deepgram live WebSocket (EU-5, 2026-04-04)
+7. ✓ Streaming Claude response with incremental text output (EU-6, 2026-04-04)
+
+**Step 7 is closed.** All criteria met as of 2026-04-04.
 
 **Step 8 (TTS → audio output) is driven from `starting_brief.md` scope**, not from `forked_assistant/`. The handoff point is: step 7 delivers text response to stdout; step 8 feeds that text to Piper and plays audio through device index 0. The `forked_assistant/` architecture requires no further changes for step 8 — TTS runs in the master process (cores 1–3) after EU-6's `run_claude_streaming()` returns each text chunk.
 
@@ -464,9 +490,16 @@ EU-3b (Track 1:        EU-3c (Track 2:        ← parallel
              │
              ▼
         Step 8: TTS → audio output  (driven from starting_brief.md)
+             │   PiperTTS proven as integration; blocked on OOM / quality issues
+             │   Off-device TTS rearchitecture required (see open_items 2026-04-05)
+             │
+             ▼
+        Step 9: Loop validation — blocked on Step 8 TTS decision
 ```
 
-EU-1 through EU-4 are complete. EU-5 and EU-6 code is written — `src/master.py` contains the streaming STT ring-tail and `CursorAgentSession` wiring (2026-04-04). The recorder child is frozen. Pi validation is the remaining step to close step 7. Step 8 is out of scope for `forked_assistant/`.
+EU-1 through EU-7 (including EU-7b live-sentence streaming) are complete and proven on Pi. Step 7 is closed (2026-04-04). The recorder child is frozen.
+
+Step 8 (TTS audio output) is partially delivered — `PiperTTS` proven as a pipeline integration but unsuitable on 1 GB Pi due to OOM. Off-device TTS rearchitecture is the current blocker. Step 9 formal validation (3–5 complete turns, latency table) follows step 8. See `archive/2026-04-05_open_items.md` for full status.
 
 ---
 
@@ -484,14 +517,21 @@ forked_assistant/
     ring_buffer.py               ← EU-2
     recorder_state.py            ← EU-3a  (RecorderState base class)
     recorder_child.py            ← EU-3d  (merged, permanent)
-    agent_session.py             ← EU-6   (AgentSession base + CursorAgentSession; written)
-    master.py                    ← EU-4/EU-5/EU-6 (streaming STT + agent integration in Pi session)
+    agent_session.py             ← EU-6   (AgentSession base + CursorAgentSession; proven 2026-04-04)
+    tts.py                       ← EU-7   (PiperTTS; reference impl — replace before step 9)
+    master.py                    ← EU-4/EU-5/EU-6/EU-7 (streaming STT + agent + TTS; proven 2026-04-04)
   test/
     smoke_test_shm.py            ← EU-1
     track1_ipc_harness.py        ← EU-3b  (throwaway after merge)
     track2_pipeline_harness.py   ← EU-3c  (throwaway after merge)
     test_harness.py              ← EU-3d  (permanent)
   archive/                       ← superseded snapshots
+    2026-04-04_streaming_architecture_analysis.md  ← EU-5 design brief
+    2026-04-04_wrapped_cursor_agent.py             ← EU-6 Cursor CLI smoke test reference
+    2026-04-04_wrapped_cursor_agent_context.md     ← stream-json schema, invocation findings
+    2026-04-04_privilege_separation_analysis.md    ← agent user / sudoers design rationale
+    2026-04-04_privilege_drop_agent_launcher.py    ← privilege-drop launcher reference
+    2026-04-05_open_items.md                       ← TTS rearchitecture, orphan detection, step 9
 ```
 
 ---

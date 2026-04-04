@@ -243,6 +243,41 @@ Each call processes one 1280-sample (80ms) chunk. Calls fire every 4 audio frame
 
 **Cross-process ONNX concurrency (Piper + OWW):** During TTS playback, master runs Piper ONNX on cores 1–3 while the recorder child is in idle phase on core 0 (SCHED_FIFO). OWW is gated off in idle, so there is no concurrent ONNX within the recorder child. However, if a future change re-enables OWW during idle, cross-process ONNX would run simultaneously — separate processes with separate ONNX sessions on separate pinned cores. This has not been characterised on Pi 4; flag as a validation item on first TTS run (watch duty-cycle reports for thermal / cache-pressure effects on OWW predict timing).
 
+## TTS Rearchitecture — Step 8/9 Prerequisite
+
+**Status: evaluation in progress. Active work folder: `mvp-modules/archive/tts_evaluation/`.**
+
+**Root cause for replacement:** `PiperTTS` (EU-7, proven 2026-04-04) has two independent
+failures on 1 GB Pi 4:
+
+1. **OOM kill** — `en_US-lessac-medium` (~63 MB ONNX) exhausted total swap.
+   master.py RSS 317 MB + 385 MB swap ≈ 700 MB against 900 MB total. Kernel sent SIGKILL.
+2. **Audio tearing** — quality below threshold, observed before the kill.
+
+Either condition independently blocks step 8 delivery.
+
+**Interface contract:** `TTSBackend.play(Iterator[str]) -> None` — any backend that
+accepts sentence-aligned chunks (from `agent_session.run()`) and plays audio through
+PyAudio device 0 satisfies the `master.py` call site without changes to master.py.
+Abstract class lives in `forked_assistant/src/tts.py`.
+
+**No process breakout needed:** Cloud TTS runs HTTP API calls in master process
+(cores 1–3). No ONNX loaded on master. OWW/Silero are gated off during TTS (idle phase
+bracket). Memory pressure from Piper ONNX is eliminated entirely.
+
+**Candidates:**
+- **Deepgram Aura** — REST API, `DEEPGRAM_API_KEY` already in `.env`; `linear16` encoding
+  avoids decode overhead; REST-only until streaming GA; evaluate first (no new setup)
+- **Cartesia** — streaming TTS, sub-200ms first-chunk latency; `CARTESIA_API_KEY` needed;
+  evaluate if Deepgram per-sentence latency is marginal (> 800ms)
+
+**Evaluation folder:** `mvp-modules/archive/tts_evaluation/`
+- `AGENTS.md` — evaluation guide, interface contract, sequence, criteria
+- `effort_log.md` — running session log with measurements and decision record
+- `deepgram_tts_notes.md` — Deepgram Aura API reference, voice controls, SDK patterns
+
+---
+
 ## Why Recorder Is Capture-Only
 
 The recorder child owns the microphone and nothing else. Playback (TTS) belongs to the master or a future separate process. This keeps the child simple and aligned with the ReSpeaker hat's input-focused design. It also avoids bidirectional audio I/O races in the same process.

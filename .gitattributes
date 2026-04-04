@@ -1,5 +1,6 @@
 # Force LF line endings for files that run on Linux (Pi).
-*.sh      text eol=lf
-*.py      text eol=lf
-*.service text eol=lf
-*.md      text eol=lf
+*.sh           text eol=lf
+*.py           text eol=lf
+*.service      text eol=lf
+*.md           text eol=lf
+scripts/hooks/ text eol=lf
