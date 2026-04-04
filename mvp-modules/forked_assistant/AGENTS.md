@@ -53,8 +53,8 @@ forked_assistant/
 | EU-3c | Track 2: Pipeline harness (real Pipecat + stub IPC) | Complete (`test/track2_pipeline_harness.py`) |
 | EU-3d | Merge: Track 1 + Track 2 into real recorder child | Complete (`src/recorder_child.py`, `test/test_harness.py`) |
 | EU-4 | Master process — batch mode (STT + Claude) | Complete (`src/master.py`, proven 2026-04-03) |
-| EU-5 | Streaming STT — Deepgram live WebSocket + ring buffer tail | Pending (required for step 7) |
-| EU-6 | Agent module — `AgentSession` abstraction + `CursorAgentSession` (Cursor CLI) | Pending (`src/agent_session.py` written; master.py integration deferred to Pi session) |
+| EU-5 | Streaming STT — Deepgram live WebSocket + ring buffer tail | Code written (`src/master.py`); Pi validation pending |
+| EU-6 | Agent module — `AgentSession` abstraction + `CursorAgentSession` (Cursor CLI) | Code written (`src/agent_session.py`, integrated in `src/master.py`); Pi validation pending |
 
 EU-3b and EU-3c are **parallel tracks** that can be developed independently. EU-3d merges them.
 
@@ -68,25 +68,36 @@ These are proven failure modes. Do not relax them:
 4. **No concurrent ONNX workloads** → OWW and Silero in non-overlapping phases only
 5. **Every FrameProcessor subclass must override `process_frame`** and call both `super().process_frame()` and `push_frame()` → silent frame swallowing otherwise
 
+## Agent Subprocess — Privilege Separation
+
+The Cursor CLI subprocess runs as a dedicated `agent` Linux user via `sudo -u agent -H`. The voice assistant processes (`master.py`, recorder child) run as `user`. The sudoers entry is narrow: `user ALL=(agent) NOPASSWD: /home/agent/.local/bin/agent`.
+
+Set `AGENT_USER=agent` in `.env` to enable. Leave unset for dev/local runs (subprocess inherits current user). `AGENT_BIN` and `AGENT_WORKSPACE` must point to `agent`'s home when `AGENT_USER` is active.
+
+Pi provisioning steps: `profiling-pi/agent-user-setup.md`. Design rationale: `archive/2026-04-04_privilege_separation_analysis.md`.
+
 ## Import Convention
 
 Test files add `sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'src'))` to resolve `src/` imports. This supports direct execution: `python test/smoke_test_shm.py` from the `forked_assistant/` directory.
 
 ## What's Next
 
-### EU-4 validation run (deferred — token quota)
+### EU-4 validation (rolled into EU-5 Pi session)
 
-The remaining EU-4 success criteria (Claude response on a full turn, 3–5 consecutive cycles, Ctrl+C from CAPTURE) are deferred until the Claude token quota resets. `master.py` currently calls `stub_claude()` in place of `run_claude()` and will be swapped back when quota allows. These criteria do not block EU-5 or EU-6 implementation.
+The remaining EU-4 success criteria (agent response on a full turn, 3–5 consecutive cycles, Ctrl+C from CAPTURE) are folded into the EU-5 Pi validation session below. The batch STT and `stub_claude()` / `run_claude()` paths are removed from `master.py`; the EU-5 streaming path is the delivery artifact for step 7.
 
-### EU-6 — Agent module (code written; Pi integration pending)
+### EU-5 + EU-6 — code written; Pi validation is the next session
 
-`src/agent_session.py` is complete. It provides `AgentSession` (abstract base) and `CursorAgentSession` (Cursor CLI implementation). The Pi integration — wiring `prepare()` to WAKE_DETECTED and `run()` into the cognitive loop — is deferred to the EU-5 Pi session (both land in `master.py` together). See `spec/agent_session_spec.md` for the full interface contract and `memory/agent_session_patterns.md` for design rationale.
+`src/master.py` is rewritten with both EU-5 (Deepgram live WebSocket ring-tail) and EU-6 (`CursorAgentSession`) integrated. On WAKE_DETECTED, `agent.prepare()` pre-spawns the agent subprocess and a `_CaptureSession` thread opens the Deepgram live WebSocket and tails the ring buffer at 20 ms intervals. On VAD_STOPPED, the thread is stopped, `send_finalize()` flushes the final transcript, and `agent.run(transcript)` streams the response to stdout.
 
-### EU-5 — Streaming STT (Pi session, with EU-6 integration)
+The Pi validation session needs to confirm:
+1. Deepgram live WebSocket connects and accumulates `is_final` transcripts correctly
+2. KeepAlive fires during silence (no NET-0001 disconnect)
+3. `agent.prepare()` + `agent.run()` produce a streaming response visible on stdout
+4. Multi-turn: 3–5 consecutive turns without degradation
+5. Ctrl+C from CAPTURE state — clean two-phase shutdown with no Pi reboot
 
-Add Deepgram live WebSocket STT in master: on WAKE_DETECTED, open a live session and call `agent.prepare()` concurrently, tail the ring buffer at ~20ms intervals sending chunks with KeepAlive during silence, accumulate `is_final` transcripts, terminate on VAD_STOPPED. On transcript ready, call `agent.run(transcript)` and yield deltas to TTS. No recorder child changes required.
-
-**API correction:** The EU-5 spec previously referenced `dg_client.listen.live.v("1")` — this is the v2/v3 SDK pattern. Current SDK (v6) uses `dg_client.listen.v1.connect(...)` as a context manager. See `spec/implementation_framework.md` EU-5 and `archive/2026-04-04_streaming_architecture_analysis.md` for full details.
+See `spec/implementation_framework.md` EU-5 and `archive/2026-04-04_streaming_architecture_analysis.md` for full design rationale. See `spec/agent_session_spec.md` for the `AgentSession` interface contract.
 
 ### Step 7 closes on EU-5 Pi session
 

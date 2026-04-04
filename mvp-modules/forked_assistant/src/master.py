@@ -1,17 +1,21 @@
 """
-master.py — Master process for the forked assistant (EU-4: batch mode).
+master.py — Master process for the forked assistant (EU-5/EU-6: streaming).
 
 Main entry point. Creates SharedMemory and Pipe, spawns the recorder child
 on core 0, then runs a synchronous event loop that:
 
   1. Waits for READY from the recorder child
   2. Sends SET_WAKE_LISTEN
-  3. On WAKE_DETECTED: sends SET_CAPTURE
-  4. On VAD_STOPPED: sends SET_IDLE (inference off, stream active), reads
-     the ring buffer span, transcribes via Deepgram, sends to Claude,
-     prints the response
+  3. On WAKE_DETECTED: pre-spawns agent subprocess (EU-6) + opens Deepgram
+     live WebSocket + starts ring-tail thread (EU-5) concurrently; sends SET_CAPTURE
+  4. On VAD_STOPPED: stops ring-tail, finalizes Deepgram stream, assembles
+     transcript, calls agent.run() for streaming text output
   5. On response complete: sends SET_WAKE_LISTEN
   6. Handles Ctrl+C → SHUTDOWN sequence
+
+STT: Deepgram Nova-3 live WebSocket (Mixed mode — Silero VAD is authoritative
+dispatch trigger; Deepgram streams in parallel and accumulates is_final results).
+Agent: CursorAgentSession (~/.local/bin/agent, stream-json, session continuity).
 
 Dependencies not in requirements.txt (already installed on Pi venv):
   deepgram-sdk, python-dotenv
@@ -19,165 +23,165 @@ Dependencies not in requirements.txt (already installed on Pi venv):
 Usage (on Pi with ReSpeaker):
     cd ~/raspberry-ai/mvp-modules/forked_assistant
     source ~/pipecat-agent/venv/bin/activate
-    python src/master.py
+    AGENT_WORKSPACE=~/raspberry-ai python src/master.py
 """
 
-import datetime
 import logging
 import os
-import struct
-import subprocess
 import sys
-import tempfile
+import threading
 import time
-import wave
 
 from multiprocessing import Pipe, Process
 from multiprocessing.shared_memory import SharedMemory
+from pathlib import Path
 
 from dotenv import load_dotenv
 
 load_dotenv(override=True)
 
 from deepgram import DeepgramClient
+from deepgram.core.events import EventType
 
-from log_config import configure_logging, TRACE
-
-logger = logging.getLogger("master")
-
-# Set SAVE_CAPTURE_WAV=<path> to write each ring-buffer span to disk before STT.
-# The value must be a path to an existing directory; ~ is expanded.
-# When unset or empty, saving is disabled. No separate flag needed.
-# Example: SAVE_CAPTURE_WAV=~/raspberry-ai/scratch/executions python master.py
-_WAV_SCRATCH_DIR = os.path.expanduser(os.environ.get("SAVE_CAPTURE_WAV", ""))
-
+from log_config import configure_logging
+from agent_session import AgentSession, CursorAgentSession, AgentError
 from recorder_child import recorder_child_entry
 from ring_buffer import (
-    CHANNELS, SAMPLE_RATE, SAMPLE_WIDTH,
+    CHANNELS, SAMPLE_RATE,
     SHM_NAME, SHM_SIZE,
     RingBufferReader,
 )
 
+logger = logging.getLogger("master")
 
-# ---------------------------------------------------------------------------
-# Agentic layer — claude CLI on Pi
-# ---------------------------------------------------------------------------
+# --- Agent / session configuration (override via environment) ---
+_AGENT_WORKSPACE = Path(os.environ.get("AGENT_WORKSPACE", str(Path.home() / "raspberry-ai")))
+_AGENT_MODEL = os.environ.get("AGENT_MODEL", "claude-4.6-sonnet-medium")
+_AGENT_BIN = Path(os.environ.get("AGENT_BIN", str(Path.home() / ".local/bin/agent")))
 
-def run_claude(transcript: str) -> str:
-    result = subprocess.run(
-        ["claude", "-p", transcript, "--model", "claude-haiku-4-5-20251001"],
-        capture_output=True, text=True, timeout=30,
-    )
-    if result.returncode != 0:
-        err = result.stderr.strip()
-        logger.error("[claude] subprocess error: %s", err)
-        return f"[claude error: {err}]"
-    return result.stdout.strip()
-
-
-def stub_claude(transcript: str) -> str:
-    """Token-free Claude stand-in. Burns ~3s of CPU to mimic inference load."""
-    logger.info("[stub_claude] simulating Claude load for transcript: %r", transcript)
-    end = time.time() + 3.0
-    x = 1.0
-    while time.time() < end:
-        for _ in range(10_000):
-            x = (x * 1.0000001 + 0.0000001) % 1e9
-    return f"[stub] received: {transcript!r}"
+# Deepgram keepalive: send every N seconds when ring write_pos has not advanced.
+# Deepgram closes the WebSocket with NET-0001 after 10 s of silence.
+_DG_KEEPALIVE_INTERVAL = 3.5
 
 
 # ---------------------------------------------------------------------------
-# STT — Deepgram file-based (batch) transcription
+# Streaming capture session — ring tail + Deepgram live WebSocket
 # ---------------------------------------------------------------------------
 
-def transcribe(audio_bytes: bytes, dg_client: DeepgramClient) -> str:
-    with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
-        with wave.open(tmp.name, "wb") as wf:
-            wf.setnchannels(CHANNELS)
-            wf.setsampwidth(SAMPLE_WIDTH)
-            wf.setframerate(SAMPLE_RATE)
-            wf.writeframes(audio_bytes)
-        tmp_path = tmp.name
+class _CaptureSession:
+    """State for one WAKE_DETECTED → VAD_STOPPED capture window."""
 
-    logger.info("sending audio to Deepgram Nova-3...")
-    try:
-        with open(tmp_path, "rb") as f:
-            response = dg_client.listen.v1.media.transcribe_file(
-                request=f.read(),
-                model="nova-3",
-                smart_format=True,
-                language="en",
-            )
-        try:
-            transcript = response.results.channels[0].alternatives[0].transcript.strip()
-        except (AttributeError, IndexError, TypeError) as e:
-            logger.warning("[dg] response structure unexpected: %s", e)
-            logger.debug("[dg] raw response: %s", response)
-            return ""
-        if not transcript:
-            logger.warning("[dg] response ok but transcript is empty (confidence=%.3f)",
-                           response.results.channels[0].alternatives[0].confidence)
-        return transcript
-    except Exception as e:
-        logger.error("Deepgram error: %s", e)
-        return ""
-    finally:
-        os.unlink(tmp_path)
+    def __init__(self) -> None:
+        self._transcripts: list[str] = []
+        self._lock = threading.Lock()
+        self.stop_event = threading.Event()
+        self.thread: threading.Thread | None = None
+
+    def add_transcript(self, text: str) -> None:
+        with self._lock:
+            self._transcripts.append(text)
+
+    def get_transcript(self) -> str:
+        with self._lock:
+            return " ".join(self._transcripts)
 
 
-# ---------------------------------------------------------------------------
-# WAV debug save — preserves each captured span for offline inspection
-# ---------------------------------------------------------------------------
+def _run_capture(
+    capture: _CaptureSession,
+    ring_reader: RingBufferReader,
+    wake_pos: int,
+    dg_client: DeepgramClient,
+) -> None:
+    """Ring-tail + Deepgram live session. Runs in a thread from WAKE_DETECTED to VAD_STOPPED.
 
-def _save_wav_debug(audio_bytes: bytes) -> None:
-    """Write audio_bytes to a timestamped WAV file when SAVE_CAPTURE_WAV is set.
-
-    SAVE_CAPTURE_WAV must be a path to an existing directory. Prints a warning
-    and skips silently if the directory does not exist.
+    Opens a Deepgram live WebSocket, tails the ring buffer at ~20 ms intervals,
+    and accumulates is_final transcripts in capture.  On stop_event, flushes
+    remaining audio, sends send_finalize(), and closes the connection.
     """
-    if not _WAV_SCRATCH_DIR:
-        return
-    if not os.path.isdir(_WAV_SCRATCH_DIR):
-        logger.warning("[wav] SAVE_CAPTURE_WAV=%r is not an existing directory — skipping",
-                       _WAV_SCRATCH_DIR)
-        return
-    ts = datetime.datetime.now().strftime("%Y-%m-%dT%H%M%S")
-    path = os.path.join(_WAV_SCRATCH_DIR, f"{ts}_capture.wav")
-    with wave.open(path, "wb") as wf:
-        wf.setnchannels(CHANNELS)
-        wf.setsampwidth(SAMPLE_WIDTH)
-        wf.setframerate(SAMPLE_RATE)
-        wf.writeframes(audio_bytes)
-    logger.debug("[wav] saved → %s", path)
+
+    def on_message(message) -> None:
+        if getattr(message, "type", None) != "Results":
+            return
+        if not message.is_final:
+            return
+        try:
+            text = message.channel.alternatives[0].transcript.strip()
+            if text:
+                capture.add_transcript(text)
+                logger.debug("[dg-live] is_final: %r", text)
+        except Exception as exc:
+            logger.debug("[dg-live] on_message parse error: %s", exc)
+
+    def on_error(error) -> None:
+        logger.error("[dg-live] error: %s", error)
+
+    try:
+        with dg_client.listen.v1.connect(
+            model="nova-3",
+            encoding="linear16",
+            sample_rate=SAMPLE_RATE,
+            channels=CHANNELS,
+            language="en-US",
+            smart_format=True,
+            interim_results=True,
+            endpointing=300,
+        ) as conn:
+            conn.on(EventType.MESSAGE, on_message)
+            conn.on(EventType.ERROR, on_error)
+            listen_thread = threading.Thread(target=conn.start_listening, daemon=True)
+            listen_thread.start()
+
+            pos = wake_pos
+            last_keepalive = time.monotonic()
+
+            while not capture.stop_event.is_set():
+                new_wp = ring_reader.write_pos
+                if new_wp != pos:
+                    chunk = ring_reader.read(pos, new_wp)
+                    if chunk:
+                        conn.send_media(chunk)
+                        last_keepalive = time.monotonic()
+                    pos = new_wp
+                elif time.monotonic() - last_keepalive >= _DG_KEEPALIVE_INTERVAL:
+                    conn.send_keep_alive()
+                    last_keepalive = time.monotonic()
+                    logger.debug("[dg-live] keepalive sent")
+                time.sleep(0.02)
+
+            # Flush any frames written between the last poll and stop_event.
+            new_wp = ring_reader.write_pos
+            if new_wp != pos:
+                chunk = ring_reader.read(pos, new_wp)
+                if chunk:
+                    conn.send_media(chunk)
+
+            conn.send_finalize()
+            time.sleep(0.2)
+            conn.send_close_stream()
+            listen_thread.join(timeout=2)
+
+    except Exception as exc:
+        logger.error("[dg-live] capture session error: %s", exc)
 
 
 # ---------------------------------------------------------------------------
-# Cognitive loop — STT + Claude with timing
+# Cognitive loop — agent response (EU-6)
 # ---------------------------------------------------------------------------
 
-def cognitive_loop(audio_bytes: bytes, dg_client: DeepgramClient) -> None:
-    duration = len(audio_bytes) / (SAMPLE_RATE * SAMPLE_WIDTH)
-    logger.info("captured %.1fs of audio", duration)
-    _save_wav_debug(audio_bytes)
-    loop_start = time.time()
-
-    transcript = transcribe(audio_bytes, dg_client)
-    stt_elapsed = time.time() - loop_start
-
+def cognitive_loop(transcript: str, agent: AgentSession) -> None:
+    """Feed transcript to agent; print streaming text chunks as they arrive."""
     if not transcript:
-        logger.warning("no transcript returned")
+        logger.warning("no transcript — skipping cognitive loop")
         return
-
     logger.info("TRANSCRIPT: %s", transcript)
-    logger.info("STT latency: %.2fs", stt_elapsed)
-
-    claude_start = time.time()
-    response = stub_claude(transcript)  # TODO: swap back to run_claude (token budget, ~2026-04-07)
-    claude_elapsed = time.time() - claude_start
-
-    logger.info("CLAUDE RESPONSE:\n%s", response)
-    logger.info("Claude latency: %.2fs", claude_elapsed)
-    logger.info("total loop latency: %.2fs", time.time() - loop_start)
+    loop_start = time.monotonic()
+    try:
+        for text_chunk in agent.run(transcript):
+            print(text_chunk, end="", flush=True)
+        print()
+    except AgentError as exc:
+        logger.error("[agent] error: %s", exc)
+    logger.info("cognitive loop latency: %.2fs", time.monotonic() - loop_start)
 
 
 # ---------------------------------------------------------------------------
@@ -233,9 +237,14 @@ def shutdown_child(pipe, child: Process) -> None:
 def master_loop(pipe, shm: SharedMemory, child: Process) -> None:
     ring_reader = RingBufferReader(shm)
     dg_client = DeepgramClient()
+    agent = CursorAgentSession(
+        workspace=_AGENT_WORKSPACE,
+        model=_AGENT_MODEL,
+        agent_bin=_AGENT_BIN,
+    )
     processing = False
     wake_pos = 0
-    vad_start_pos = 0
+    capture: _CaptureSession | None = None
 
     msg = pipe.recv()
     if msg["cmd"] != "READY":
@@ -245,81 +254,76 @@ def master_loop(pipe, shm: SharedMemory, child: Process) -> None:
     pipe.send({"cmd": "SET_WAKE_LISTEN"})
     logger.info("listening for wake word...")
 
-    while True:
-        msg = pipe.recv()
-        cmd = msg["cmd"]
+    try:
+        while True:
+            msg = pipe.recv()
+            cmd = msg["cmd"]
 
-        if cmd == "STATE_CHANGED":
-            logger.debug("[master] state -> %s", msg['state'])
+            if cmd == "STATE_CHANGED":
+                logger.debug("[master] state -> %s", msg["state"])
 
-        elif cmd == "WAKE_DETECTED":
-            if processing:
-                logger.warning("[master] still processing previous utterance, ignoring wake")
-                continue
-            wake_pos = msg["write_pos"]
-            logger.info("[master] WAKE_DETECTED  score=%.3f  keyword=%s",
-                        msg['score'], msg['keyword'])
-            pipe.send({"cmd": "SET_CAPTURE"})
+            elif cmd == "WAKE_DETECTED":
+                if processing:
+                    logger.warning("[master] still processing previous utterance, ignoring wake")
+                    continue
+                wake_pos = msg["write_pos"]
+                logger.info("[master] WAKE_DETECTED  score=%.3f  keyword=%s",
+                            msg["score"], msg["keyword"])
 
-        elif cmd == "VAD_STARTED":
-            vad_start_pos = msg["write_pos"]
-            logger.info("[master] VAD_STARTED    write_pos=%d", vad_start_pos)
+                # Pre-spawn agent (hides startup latency behind the STT window)
+                # and open Deepgram live session + ring tail concurrently.
+                agent.prepare()
+                capture = _CaptureSession()
+                capture.thread = threading.Thread(
+                    target=_run_capture,
+                    args=(capture, ring_reader, wake_pos, dg_client),
+                    daemon=True,
+                )
+                capture.thread.start()
+                pipe.send({"cmd": "SET_CAPTURE"})
 
-        elif cmd == "VAD_STOPPED":
-            end_pos = msg["write_pos"]
-            # Always read from wake_pos — captures the full utterance including
-            # pre-speech audio that precedes the Silero onset delay (~0.2s
-            # start_secs plus processing). vad_start_pos is logged as advisory
-            # so the onset gap is visible, but it is not used as the span start.
-            start = wake_pos
-            span = end_pos - start
-            dur_s = span / (SAMPLE_RATE * SAMPLE_WIDTH)
-            live_wp = ring_reader.write_pos
-            stale = ring_reader.is_stale(start)
-            vad_gap = vad_start_pos - wake_pos if vad_start_pos else 0
-            vad_gap_s = vad_gap / (SAMPLE_RATE * SAMPLE_WIDTH)
-            logger.info("[master] VAD_STOPPED    write_pos=%d", end_pos)
-            logger.debug("[ring] span: start=%d(wake)  end=%d  bytes=%d  dur=%.2fs",
-                         start, end_pos, span, dur_s)
-            logger.debug("[ring] vad_start=%d  vad_gap=%db (%.2fs pre-speech dropped previously)",
-                         vad_start_pos, vad_gap, vad_gap_s)
-            logger.debug("[ring] live write_pos=%d  stale=%s", live_wp, stale)
+            elif cmd == "VAD_STARTED":
+                logger.info("[master] VAD_STARTED    write_pos=%d", msg["write_pos"])
 
-            audio_bytes = ring_reader.read(start, end_pos)
+            elif cmd == "VAD_STOPPED":
+                logger.info("[master] VAD_STOPPED    write_pos=%d", msg["write_pos"])
 
-            if not audio_bytes:
-                logger.warning("[ring] read returned empty  (span=%d  stale=%s)", span, stale)
-            else:
-                n_samples = len(audio_bytes) // SAMPLE_WIDTH
-                samples = struct.unpack_from(f'<{n_samples}h', audio_bytes)
-                zero_samples = samples.count(0)
-                rms = (sum(s * s for s in samples) / n_samples) ** 0.5
-                head = samples[:8]
-                tail = samples[-4:]
-                logger.debug("[ring] read ok: %d bytes  %d samples  zeros=%d  rms=%.1f",
-                             len(audio_bytes), n_samples, zero_samples, rms)
-                logger.log(TRACE, "[ring] head=%s  tail=%s", head, tail)
+                # Stop the ring tail and wait for Deepgram to finalize.
+                if capture is not None:
+                    capture.stop_event.set()
+                    if capture.thread is not None:
+                        capture.thread.join(timeout=5)
 
-            pipe.send({"cmd": "SET_IDLE"})
-            processing = True
-            try:
-                cognitive_loop(audio_bytes, dg_client)
-            except Exception as e:
-                logger.error("cognitive loop error: %s", e)
-            finally:
-                processing = False
+                transcript = capture.get_transcript() if capture else ""
+                capture = None
+
+                pipe.send({"cmd": "SET_IDLE"})
+                processing = True
                 try:
-                    pipe.send({"cmd": "SET_WAKE_LISTEN"})
-                except (BrokenPipeError, OSError):
-                    pass
-                logger.info("listening for wake word...")
+                    cognitive_loop(transcript, agent)
+                except Exception as exc:
+                    logger.error("cognitive loop error: %s", exc)
+                finally:
+                    processing = False
+                    try:
+                        pipe.send({"cmd": "SET_WAKE_LISTEN"})
+                    except (BrokenPipeError, OSError):
+                        pass
+                    logger.info("listening for wake word...")
 
-        elif cmd == "SHUTDOWN_COMMENCED":
-            logger.info("[master] child initiated shutdown")
-            return
+            elif cmd == "SHUTDOWN_COMMENCED":
+                logger.info("[master] child initiated shutdown")
+                return
 
-        elif cmd == "ERROR":
-            logger.error("[master] ERROR from child: %s", msg.get('msg', '?'))
+            elif cmd == "ERROR":
+                logger.error("[master] ERROR from child: %s", msg.get("msg", "?"))
+
+    finally:
+        agent.close()
+        if capture is not None:
+            capture.stop_event.set()
+            if capture.thread is not None:
+                capture.thread.join(timeout=3)
 
 
 # ---------------------------------------------------------------------------

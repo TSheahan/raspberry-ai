@@ -206,6 +206,12 @@ def _word_boundary_chunks(raw_deltas: Iterator[str]) -> Iterator[str]:
 
 _DEFAULT_RESUME_WINDOW = float(os.environ.get("AGENT_RESUME_WINDOW_SECS", "300"))
 
+# When set, the agent subprocess is launched as this Linux user via
+# `sudo -u <AGENT_USER> -H --`. Requires a sudoers entry:
+#   user ALL=(agent) NOPASSWD: /home/agent/.local/bin/agent
+# Leave unset (default) to run the agent as the current process user.
+_AGENT_USER = os.environ.get("AGENT_USER", "")
+
 
 class CursorAgentSession(AgentSession):
     """AgentSession backed by the Cursor CLI (~/.local/bin/agent).
@@ -254,7 +260,7 @@ class CursorAgentSession(AgentSession):
         if not resuming:
             self._on_fresh_start()
 
-        cmd = [
+        agent_args = [
             str(self._agent_bin),
             "-p",
             "--output-format", "stream-json",
@@ -266,10 +272,15 @@ class CursorAgentSession(AgentSession):
             "--model", self._model,
         ]
         if resuming and self._session_id:
-            cmd.extend(["--resume", self._session_id])
+            agent_args.extend(["--resume", self._session_id])
             logger.info("[agent] pre-spawning (resume %s...)", self._session_id[:8])
         else:
             logger.info("[agent] pre-spawning (fresh session)")
+
+        # Prefix with sudo when AGENT_USER is configured so the subprocess runs
+        # as the dedicated agent Linux user. The "--" prevents sudo from
+        # interpreting subsequent flags (e.g. --resume) as its own options.
+        cmd = (["sudo", "-u", _AGENT_USER, "-H", "--"] + agent_args) if _AGENT_USER else agent_args
 
         self._process = subprocess.Popen(
             cmd,
@@ -278,6 +289,7 @@ class CursorAgentSession(AgentSession):
             stderr=subprocess.PIPE,
             text=True,
             bufsize=1,
+            start_new_session=True,
         )
         logger.debug("[agent] pid=%d workspace=%s model=%s",
                      self._process.pid, self._workspace, self._model)

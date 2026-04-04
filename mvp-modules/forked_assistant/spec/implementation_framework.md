@@ -294,6 +294,16 @@ Remaining validation before step 7 closes: (1) confirm Claude response text prin
 
 **Estimated scope:** ~80 lines added to master. One Pi session (EU-5 + EU-6 integration land together).
 
+**Code written (2026-04-04):** `src/master.py` rewritten with EU-5 streaming and EU-6 agent wiring integrated. Key implementation notes:
+- `EventType` imported from `deepgram.core.events` (SDK v6 path, confirmed from official docs).
+- `on_message` callback checks `message.type == "Results"` and `message.is_final` before accumulating.
+- `_CaptureSession` class encapsulates transcript accumulator + stop_event + thread handle.
+- Ring tail runs in a `threading.Thread` (daemon). On `VAD_STOPPED`, `stop_event.set()` → `thread.join(timeout=5)` → `send_finalize()` → `send_close_stream()` inside the context manager.
+- `agent.prepare()` called synchronously on `WAKE_DETECTED` (Popen is non-blocking; returns immediately).
+- `cognitive_loop(transcript, agent)` replaces the old `cognitive_loop(audio_bytes, dg_client)`. Prints text chunks from `agent.run()` incrementally.
+- Batch STT (`transcribe()`, `run_claude()`, `stub_claude()`, `_save_wav_debug()`) removed.
+- Pi validation required before marking EU-5 and EU-6 complete.
+
 ---
 
 ### EU-6: Agent Module — `AgentSession` Abstraction
@@ -336,7 +346,7 @@ stdin receives the transcript; stdout is a stream of newline-delimited JSON even
 
 **Known regression:** Claude CLI `-p` with `subprocess.run` has a known empty-stdout regression (v2.1.83). Cursor CLI via `stream-json` / `Popen` is not affected.
 
-**Status:** `src/agent_session.py` is written. Pi integration (wiring `prepare()` to WAKE_DETECTED and `run()` into `cognitive_loop()`) is deferred to the EU-5 Pi session — both changes land in `master.py` together.
+**Status:** `src/agent_session.py` is written. Pi integration is complete in `src/master.py` (2026-04-04) — `prepare()` is called on WAKE_DETECTED and `run()` drives the cognitive loop. Pi validation is the remaining step.
 
 **Estimated scope:** ~160 lines (`agent_session.py` written). Pi integration ~30 lines in `master.py`.
 
@@ -456,7 +466,7 @@ EU-3b (Track 1:        EU-3c (Track 2:        ← parallel
         Step 8: TTS → audio output  (driven from starting_brief.md)
 ```
 
-EU-1 through EU-4 are complete. EU-5 and EU-6 are required to close step 7. Both are master-only changes — the recorder child is frozen. `src/agent_session.py` (EU-6) is written; its integration into `master.py` and EU-5's streaming STT land together in the same Pi session. Step 8 is out of scope for `forked_assistant/`.
+EU-1 through EU-4 are complete. EU-5 and EU-6 code is written — `src/master.py` contains the streaming STT ring-tail and `CursorAgentSession` wiring (2026-04-04). The recorder child is frozen. Pi validation is the remaining step to close step 7. Step 8 is out of scope for `forked_assistant/`.
 
 ---
 
