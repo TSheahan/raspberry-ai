@@ -8,8 +8,8 @@ across the process boundary.
 
 Usage:
     from log_config import configure_logging, TRACE, PERF
+    from loguru import logger
     configure_logging()          # call once at process entry
-    logger = logging.getLogger("my_module")
     logger.log(TRACE, "per-frame detail: %s", value)
 
 LOG_LEVEL env var controls the minimum level. Accepts: TRACE, PERF, DEBUG,
@@ -33,6 +33,15 @@ PERF  = 8
 # Register PERF with loguru. TRACE already exists natively at level 5.
 logger.level("PERF", no=PERF, color="<magenta>", icon="⚡")
 
+# Resolved numeric level — set by configure_logging(), read by callers that
+# need the active threshold without re-parsing the environment.
+_active_level_no: int = 20  # INFO until configure_logging() runs
+
+
+def active_level_no() -> int:
+    """Return the numeric log level resolved by the most recent configure_logging() call."""
+    return _active_level_no
+
 
 class _InterceptHandler(logging.Handler):
     """Route stdlib logging records into loguru."""
@@ -54,10 +63,10 @@ class _InterceptHandler(logging.Handler):
 def _format(record: dict) -> str:
     """Format callable for the loguru sink.
 
-    Uses the stdlib logger name (stored in extra["name"] by _InterceptHandler)
-    for our own code. Falls back to the loguru module name for Pipecat's own
-    direct loguru calls, which don't bind extra["name"]. Includes
-    {function}:{line} matching loguru's default format exactly.
+    Uses extra["name"] when present (set by master.py's logger.bind call)
+    so that process shows as "master" rather than "__main__". Falls back to
+    the loguru module name for all other callers. Matches loguru's default
+    format with {function}:{line} for call-site context.
     """
     name = record["extra"].get("name", record["name"])
     return (
@@ -71,13 +80,16 @@ def _format(record: dict) -> str:
 def configure_logging(default_level: str = "INFO") -> None:
     """Configure loguru as the unified sink for both our code and Pipecat.
 
-    Installs _InterceptHandler on the stdlib root logger so that calls to
-    logging.getLogger("x").info(...) etc. are forwarded into loguru. Removes
-    loguru's default stderr sink and re-adds it filtered to the requested level.
+    Installs _InterceptHandler on the stdlib root logger so that third-party
+    libraries (websockets, deepgram, asyncio) are forwarded into loguru. Our
+    own source files use loguru directly. Removes loguru's default stderr sink
+    and re-adds it filtered to the requested level.
 
     Must be called once per process, before any logging calls are made.
     """
+    global _active_level_no
     level_name = os.environ.get("LOG_LEVEL", default_level).upper()
+    _active_level_no = logger.level(level_name).no
 
     # Replace loguru's default sink with one filtered to our level.
     # Loguru resolves "TRACE", "PERF", "DEBUG" etc. against its registered

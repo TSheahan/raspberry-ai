@@ -30,7 +30,7 @@ import numpy as np
 from collections import defaultdict, deque
 from multiprocessing.shared_memory import SharedMemory
 
-from log_config import configure_logging, PERF, TRACE
+from log_config import active_level_no, configure_logging, PERF, TRACE
 from loguru import logger
 
 from openwakeword.model import Model as OWWModel
@@ -53,12 +53,12 @@ from recorder_state import RecorderState
 from ring_buffer import RingBufferWriter
 
 def _duty_cycle_enabled() -> bool:
-    """True when the root logger level is at or below PERF (8).
+    """True when the active log level is at or below PERF (8).
 
-    Checked once during child process setup, after configure_logging() has run.
-    Avoids an env-var dependency — LOG_LEVEL is the single verbosity control.
+    Reads the level resolved by configure_logging() rather than re-parsing
+    LOG_LEVEL, keeping both sides of the threshold decision in sync.
     """
-    return logging.getLogger().isEnabledFor(PERF)
+    return active_level_no() <= PERF
 
 
 # ---------------------------------------------------------------------------
