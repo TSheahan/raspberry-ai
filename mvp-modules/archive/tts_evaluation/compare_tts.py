@@ -23,6 +23,8 @@ Options:
     --cartesia-only         Run Cartesia only
     --sentence TEXT         Add a test sentence (repeatable; replaces defaults)
     --pause SECS            Pause between backends/sentences, default 2.0
+    --frames-per-buffer N   PyAudio frames_per_buffer (default: PortAudio chooses).
+                            Use replay_wav.py to sweep values; apply the clean one here.
     --dg-model NAME         Deepgram voice ID, default: aura-2-thalia-en
     --dg-speed FLOAT        Deepgram speed 0.7–1.5, default: 0.9
     --el-voice-id ID        ElevenLabs voice ID, default: Rachel (21m00Tcm4TlvDq8ikWAM)
@@ -95,14 +97,28 @@ def _rss_mb() -> float:
     return 0.0
 
 
+_FRAMES_PER_BUFFER: int | None = None  # set from --frames-per-buffer at startup
+
+
 def _open_stream(pa: pyaudio.PyAudio, sample_rate: int) -> pyaudio.Stream:
-    return pa.open(
+    kwargs: dict = dict(
         format=pyaudio.paInt16,
         channels=1,
         rate=sample_rate,
         output=True,
         output_device_index=PYAUDIO_DEVICE_INDEX,
     )
+    if _FRAMES_PER_BUFFER is not None:
+        kwargs["frames_per_buffer"] = _FRAMES_PER_BUFFER
+    stream = pa.open(**kwargs)
+    latency_s = stream.get_output_latency()
+    latency_frames = round(latency_s * sample_rate)
+    logger.debug(
+        "[audio] negotiated output latency: {:.1f}ms ({} frames at {}Hz)  frames_per_buffer={}",
+        latency_s * 1000, latency_frames, sample_rate,
+        _FRAMES_PER_BUFFER if _FRAMES_PER_BUFFER is not None else "default",
+    )
+    return stream
 
 
 def _save_wav(path: Path, pcm_bytes: bytes, sample_rate: int) -> None:
@@ -504,6 +520,10 @@ def _parse_args() -> argparse.Namespace:
                         "(default dir: current directory)")
     p.add_argument("--pause", type=float, default=2.0, metavar="SECS",
                    help="Pause between backends within a sentence (default: 2.0)")
+    p.add_argument("--frames-per-buffer", type=int, default=None, metavar="N",
+                   help="PyAudio frames_per_buffer passed to pa.open() for all backends. "
+                        "Leave unset to let PortAudio choose (default). "
+                        "Use replay_wav.py to find the first clean value, then pass it here.")
     p.add_argument("--dg-model", default="aura-2-thalia-en", metavar="NAME",
                    help="Deepgram voice ID (default: aura-2-thalia-en)")
     p.add_argument("--dg-speed", type=float, default=0.9, metavar="FLOAT",
@@ -522,7 +542,9 @@ def _parse_args() -> argparse.Namespace:
 
 
 def main() -> None:
+    global _FRAMES_PER_BUFFER
     args = _parse_args()
+    _FRAMES_PER_BUFFER = args.frames_per_buffer
     sentences = args.sentences or DEFAULT_SENTENCES
 
     run_deepgram = args.deepgram_only or not (args.elevenlabs_only or args.cartesia_only)
