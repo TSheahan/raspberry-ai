@@ -294,11 +294,8 @@ def _run_cartesia_sentence(
                     if save_path:
                         pcm_buffer.append(response.audio)
                 elif response.type == "error":
-                    logger.error(
-                        "[cartesia] API error  status={}  error={!r}",
-                        getattr(response, "status_code", "?"),
-                        getattr(response, "error", "?"),
-                    )
+                    raw = response.model_dump() if hasattr(response, "model_dump") else vars(response)
+                    logger.error("[cartesia] API error  full_response={}", raw)
                     break
                 elif response.type == "done":
                     break
