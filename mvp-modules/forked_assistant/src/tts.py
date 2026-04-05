@@ -237,7 +237,7 @@ class CartesiaTTS(TTSBackend):
         CARTESIA_API_KEY in .env      (new account required)
 
     Constructor args:
-        model       — Cartesia model ID (default: sonic-english)
+        model       — Cartesia model ID (default: sonic-3)
         voice_id    — Cartesia voice UUID; find voices at https://play.cartesia.ai/voices
         sample_rate — PCM sample rate (default: 22050 Hz)
 
@@ -245,7 +245,7 @@ class CartesiaTTS(TTSBackend):
     Activate only if Deepgram Phase 1 latency exceeds 800ms per sentence.
     """
 
-    _DEFAULT_MODEL = "sonic-english"
+    _DEFAULT_MODEL = "sonic-3"
     _DEFAULT_SAMPLE_RATE = 22050
 
     def __init__(
@@ -285,24 +285,24 @@ class CartesiaTTS(TTSBackend):
     def _synthesise_to_output(self, text: str, out: _AudioOut) -> None:
         """Open a Cartesia WebSocket send and write audio chunks as they arrive."""
         try:
-            ws = self._client.tts.websocket_connect()
             bytes_written = 0
-            for audio_chunk in ws.send(
-                model_id=self._model,
-                transcript=text,
-                voice={"mode": "id", "id": self._voice_id},
-                output_format={
-                    "container": "raw",
-                    "encoding": "pcm_s16le",
-                    "sample_rate": self._sample_rate,
-                },
-                stream=True,
-            ):
-                audio = getattr(audio_chunk, "audio", None)
-                if audio:
-                    out.write(audio)
-                    bytes_written += len(audio)
-            ws.close()
+            with self._client.tts.websocket_connect() as connection:
+                connection.send({
+                    "model_id": self._model,
+                    "transcript": text,
+                    "voice": {"mode": "id", "id": self._voice_id},
+                    "output_format": {
+                        "container": "raw",
+                        "encoding": "pcm_s16le",
+                        "sample_rate": self._sample_rate,
+                    },
+                })
+                for response in connection:
+                    if response.type == "chunk" and response.audio:
+                        out.write(response.audio)
+                        bytes_written += len(response.audio)
+                    elif response.done:
+                        break
             logger.debug("[tts] cartesia wrote {} bytes", bytes_written)
         except Exception:
             logger.exception("[tts] Cartesia synthesis failed for chunk: {!r}", text[:60])

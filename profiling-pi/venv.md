@@ -1,5 +1,11 @@
 # Python venv — Dependency Profiles
 
+** USER NOTE **
+
+There is a stale decision embodied here about where to put the venv, which must be revised before execution:
+- voice agent appliance runs the app as `user` from the raspberry-ai repo
+- the venv provides dependencies for the app
+
 Package installs into `~/pipecat-agent/venv/` on morpheus (Pi 4). Each section
 profiles one dependency: target state, install instructions, verification.
 

@@ -75,18 +75,66 @@ REST-only; full audio received before playback starts. ElevenLabs Flash v2.5
 **Audio quality (PyAudio):** Tearing present on all runs. Content confirmed clean
 via `aplay` — tearing is in the PortAudio path, not the synthesis.
 
-### Phase 1 re-run needed (pyalsaaudio)
+### Phase 1 re-run (pyalsaaudio) — session 3, 2026-04-05
 
-Session 2 replaced PyAudio with pyalsaaudio (tearing fix confirmed). Phase 1
-must be re-run with the updated `compare_tts.py` to get a clean quality assessment.
-Latency numbers are expected unchanged (API latency is independent of audio output).
+Run from `~/deepgram-benchmark-venv` on morpheus. Audio output via pyalsaaudio
+(direct ALSA `hw:0,0`). No tearing observed — audio played clean through 3.5mm jack.
+
+| Sentence | Latency | Total | Audio | RSS |
+|----------|---------|-------|-------|-----|
+| Hello, how can I help you today? | 1901ms | 4192ms | 106.9 KB | 47 MB |
+| Your CPAP therapy last night... | 3230ms | 8845ms | 262.5 KB | 48 MB |
+| I have added a reminder... | 2869ms | 7557ms | 219.4 KB | 49 MB |
+| **avg** | **2667ms** | | | **48 MB** |
+
+**Latency verdict:** MARGINAL (2667ms avg, threshold 800ms). Structural — Deepgram
+TTS is REST-only; full audio downloaded before playback starts. Proceed to Phase 2.
+
+**Memory verdict:** 48 MB RSS — well clear of the 700 MB danger zone.
+
+**Audio quality (pyalsaaudio):** Clean — no tearing. Deepgram Aura-2 voice quality
+is acceptable for CPAP/calendar/routine use cases.
+
+**OOM?** No. 48 MB RSS is negligible.
 
 ---
 
-## Phase 2 — ElevenLabs / Cartesia (not yet run, conditional)
+## Phase 2a — ElevenLabs (Pi run, session 3, 2026-04-05)
 
-*Run only if Phase 1 latency is marginal (> 800ms per sentence). Deepgram latency
-was 2613ms avg — likely proceeding to Phase 2a (ElevenLabs) for streaming latency.*
+Run from `~/deepgram-benchmark-venv` on morpheus. ElevenLabs starter plan subscription
+active. Audio output via pyalsaaudio.
+
+| Sentence | Latency | Total | Audio | RSS |
+|----------|---------|-------|-------|-----|
+| Hello, how can I help you today? | 2791ms | 4886ms | 98.0 KB | 49 MB |
+| Your CPAP therapy last night... | 361ms | 5214ms | 226.4 KB | 50 MB |
+| I have added a reminder... | 696ms | 4464ms | 176.3 KB | 50 MB |
+| **avg** | **1283ms** | | | **50 MB** |
+
+**Latency verdict:** First sentence 2791ms (cold start — connection establishment +
+model load). Subsequent sentences 361ms and 696ms — well within 800ms target once
+warm. Average pulled up by cold start; steady-state latency ~530ms.
+
+**Memory verdict:** 50 MB RSS — well clear of danger zone.
+
+**Audio quality:** [fill in — subjective assessment from Pi run]
+
+**OOM?** No. 50 MB RSS is negligible.
+
+**Cold start observation:** The 2791ms first-call latency is likely ElevenLabs
+server-side model loading for Flash v2.5. In production, `agent.prepare()` could
+pre-warm the connection by sending a dummy request during the STT phase.
+
+---
+
+## Phase 2b — Cartesia (Pi run, session 3, 2026-04-05)
+
+Voice selected: Katie (`f786b574-daa5-4673-aa0c-cbe3e8534c02`) from
+[play.cartesia.ai](https://play.cartesia.ai/voices?language=en).
+
+Package: `cartesia==3.0.2`. SDK v3 broke the WebSocket API — `websocket_connect()`
+now returns a context manager, `send()` takes a dict, iteration is over the
+connection object. Fixed in `compare_tts.py` and `tts.py`. **Re-run needed.**
 
 ---
 

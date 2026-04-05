@@ -32,7 +32,7 @@ Options:
     --dg-speed FLOAT        Deepgram speed 0.7–1.5, default: 0.9
     --el-voice-id ID        ElevenLabs voice ID, default: Rachel (21m00Tcm4TlvDq8ikWAM)
     --el-model NAME         ElevenLabs model ID, default: eleven_flash_v2_5
-    --cartesia-model NAME   Cartesia model ID, default: sonic-english
+    --cartesia-model NAME   Cartesia model ID, default: sonic-3
     --cartesia-voice-id ID  Cartesia voice UUID (required for Cartesia runs)
     --cartesia-rate HZ      Cartesia PCM sample rate, default: 22050
 
@@ -272,30 +272,30 @@ def _run_cartesia_sentence(
 
     pcm_buffer: list[bytes] = []
     out = _AudioOut(sample_rate)
-    ws = client.tts.websocket_connect()
     try:
-        for chunk in ws.send(
-            model_id=model,
-            transcript=text,
-            voice={"mode": "id", "id": voice_id},
-            output_format={
-                "container": "raw",
-                "encoding": "pcm_s16le",
-                "sample_rate": sample_rate,
-            },
-            stream=True,
-        ):
-            audio = getattr(chunk, "audio", None)
-            if audio:
-                if first_chunk_ms is None:
-                    first_chunk_ms = (time.monotonic() - t0) * 1000
-                    logger.info("[cartesia] first chunk in {:.0f} ms", first_chunk_ms)
-                out.write(audio)
-                total_bytes += len(audio)
-                if save_path:
-                    pcm_buffer.append(audio)
+        with client.tts.websocket_connect() as connection:
+            connection.send({
+                "model_id": model,
+                "transcript": text,
+                "voice": {"mode": "id", "id": voice_id},
+                "output_format": {
+                    "container": "raw",
+                    "encoding": "pcm_s16le",
+                    "sample_rate": sample_rate,
+                },
+            })
+            for response in connection:
+                if response.type == "chunk" and response.audio:
+                    if first_chunk_ms is None:
+                        first_chunk_ms = (time.monotonic() - t0) * 1000
+                        logger.info("[cartesia] first chunk in {:.0f} ms", first_chunk_ms)
+                    out.write(response.audio)
+                    total_bytes += len(response.audio)
+                    if save_path:
+                        pcm_buffer.append(response.audio)
+                elif response.done:
+                    break
     finally:
-        ws.close()
         out.close()
 
     if save_path and pcm_buffer:
@@ -531,8 +531,8 @@ def _parse_args() -> argparse.Namespace:
                    help="ElevenLabs voice ID (default: Rachel — 21m00Tcm4TlvDq8ikWAM)")
     p.add_argument("--el-model", default="eleven_flash_v2_5", metavar="NAME",
                    help="ElevenLabs model ID (default: eleven_flash_v2_5)")
-    p.add_argument("--cartesia-model", default="sonic-english", metavar="NAME",
-                   help="Cartesia model ID (default: sonic-english)")
+    p.add_argument("--cartesia-model", default="sonic-3", metavar="NAME",
+                   help="Cartesia model ID (default: sonic-3)")
     p.add_argument("--cartesia-voice-id", default="", metavar="UUID",
                    help="Cartesia voice UUID — find one at https://play.cartesia.ai/voices")
     p.add_argument("--cartesia-rate", type=int, default=CARTESIA_SAMPLE_RATE, metavar="HZ",
