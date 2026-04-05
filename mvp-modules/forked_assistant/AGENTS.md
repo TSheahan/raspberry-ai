@@ -44,7 +44,8 @@ forked_assistant/
     ├── 2026-04-02T1401_track2_pipeline_harness.py ← v03 dead end (per-processor timing, wrong instrumentation unit)
     ├── 2026-04-04_streaming_architecture_analysis.md ← EU-5 design brief: streaming vs batch STT analysis
     ├── 2026-04-04_wrapped_cursor_agent.py           ← Cursor CLI pre-spawn smoke test (EU-6 reference)
-    └── 2026-04-04_wrapped_cursor_agent_context.md   ← Cursor CLI invocation pattern, stream-json schema, findings
+    ├── 2026-04-04_wrapped_cursor_agent_context.md   ← Cursor CLI invocation pattern, stream-json schema, findings
+    └── 2026-04-06_agent_wrapper_handoff_brief.md    ← handoff: agent CLI wrapper + git hook + profiling (design TBD)
 ```
 
 ## Implementation Phasing (Effort Units)

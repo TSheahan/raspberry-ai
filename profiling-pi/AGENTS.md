@@ -63,6 +63,8 @@ Each file owns exactly one provisioning domain:
 | `pip-hardening.md` | pip cooldown wrapper and supply-chain protections |
 | `priority-permissions.md` | Real-time scheduling, CPU pinning, and process priority |
 
+**Related (not a profiling profile):** agent CLI wrapper design handoff lives in `mvp-modules/forked_assistant/archive/2026-04-06_agent_wrapper_handoff_brief.md` (Pi provisioning for that work extends `profiling-pi` when implemented).
+
 New profiles should follow the same three-section pattern and own a single concern.
 Not all existing files fully conform to this structure yet — they should be
 updated to converge toward it over time.
