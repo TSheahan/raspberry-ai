@@ -134,7 +134,66 @@ Voice selected: Katie (`f786b574-daa5-4673-aa0c-cbe3e8534c02`) from
 
 Package: `cartesia==3.0.2`. SDK v3 broke the WebSocket API — `websocket_connect()`
 now returns a context manager, `send()` takes a dict, iteration is over the
-connection object. Fixed in `compare_tts.py` and `tts.py`. **Re-run needed.**
+connection object. Additionally, auto-generated `context_id` contained `::` which
+violates Cartesia's own validation; fixed by supplying explicit `context_id`.
+
+| Sentence | Latency | Total | Audio | RSS |
+|----------|---------|-------|-------|-----|
+| Hello, how can I help you today? | 1184ms | 2571ms | 64.0 KB | 48 MB |
+| Your CPAP therapy last night... | 857ms | 5021ms | 184.0 KB | 51 MB |
+| I have added a reminder... | 1031ms | 4044ms | 134.0 KB | 52 MB |
+| **avg** | **1024ms** | | | **50 MB** |
+
+**Latency verdict:** 1024ms avg first-chunk (streaming). Above 800ms target but
+audio begins playing while synthesis continues — perceived latency lower than
+Deepgram REST (which blocks until full download).
+
+**Memory verdict:** 50 MB RSS — well clear of danger zone.
+
+**Audio quality:** Leading playback truncation on sentences 1 and 3 (first ~100ms
+of audio clipped). WAV files confirmed clean via `aplay -D plughw:0,0` — the
+truncation is in the ALSA device startup path, not the synthesis. Likely cause:
+first `snd_pcm_writei()` on a freshly opened PCM device loses samples before the
+hardware DMA buffer fills. A silence pre-fill on device open would fix this.
+
+**OOM?** No. 50 MB RSS is negligible.
+
+---
+
+## Combined run — all three backends, session 3
+
+Head-to-head with all backends in sequence per sentence. ElevenLabs warm by the
+time it runs (Deepgram goes first). pyalsaaudio audio output throughout.
+
+| Sentence | Backend | Latency | Total | Audio | RSS |
+|----------|---------|---------|-------|-------|-----|
+| Hello... | deepgram | 1845ms | 4018ms | 101.3 KB | 47 MB |
+| Hello... | elevenlabs | 790ms | 2711ms | 89.3 KB | 51 MB |
+| Hello... | cartesia | 1171ms | 2925ms | 80.0 KB | 54 MB |
+| CPAP therapy... | deepgram | 3488ms | 9498ms | 281.3 KB | 55 MB |
+| CPAP therapy... | elevenlabs | 334ms | 5185ms | 226.4 KB | 56 MB |
+| CPAP therapy... | cartesia | 1085ms | 5323ms | 182.0 KB | 58 MB |
+| Reminder... | deepgram | 2591ms | 6921ms | 202.5 KB | 59 MB |
+| Reminder... | elevenlabs | 333ms | 4435ms | 191.6 KB | 59 MB |
+| Reminder... | cartesia | 872ms | 4353ms | 154.0 KB | 61 MB |
+
+### Summary
+
+| Backend | Avg first-chunk | Streaming? | Avg total | RSS | Quality |
+|---------|-----------------|------------|-----------|-----|---------|
+| Deepgram | 2642ms | No (REST) | 6812ms | 54 MB | Outstanding |
+| ElevenLabs | 486ms | Yes | 4110ms | 55 MB | Outstanding |
+| Cartesia | 1043ms | Yes | 4200ms | 57 MB | Outstanding (rushed pacing — tunable via voice/speed) |
+
+All three backends produce outstanding audio quality through the Pi 3.5mm jack
+with pyalsaaudio output. No OOM risk — all under 61 MB RSS.
+
+**ElevenLabs** is the clear latency winner: 486ms avg first-chunk, 5x faster
+than Deepgram REST and 2x faster than Cartesia. The ~2.8s cold start observed
+in isolated runs disappears when preceded by other network activity (warm TCP/TLS).
+
+Cartesia's rushed pacing is likely tunable via `generation_config.speed` or
+voice selection. Deepgram is structurally limited by REST-only (no streaming).
 
 ---
 
@@ -182,6 +241,13 @@ via the `_AudioOut` abstraction. PyAudio retained as Windows-only fallback for d
 
 ---
 
-## Decision (not yet made)
+## Decision
 
-*Record selected backend and rationale here.*
+**Keep all three as selectable `TTSBackend` modules.** Quality is outstanding
+across the board. No single controlling decision factor — latency favours
+ElevenLabs, simplicity favours Deepgram, Cartesia offers the richest control
+surface. Subscription surprises or other contingencies could force a change.
+
+Proceed to tuning phase: voice selection, cadence control, warm-start latency
+optimisation across all three backends. `compare_tts.py` is the sandbox.
+See `tuning_plan.md` for the spec.

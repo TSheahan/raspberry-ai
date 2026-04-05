@@ -91,63 +91,43 @@ For cloud REST backends (no native streaming), the implementation pattern is:
 
 ## Evaluation Sequence
 
-### Phase 1 — Deepgram Aura (Pi run)
+### Phases 1–2 — complete (session 3, 2026-04-05)
 
-`DeepgramTTS` is already written in `mvp-modules/forked_assistant/src/tts.py`.
-Session 1 ran Deepgram on Pi with PyAudio — latency was MARGINAL (avg 2613ms)
-and audio tearing was present. Session 2 identified PortAudio as the tearing
-root cause and replaced it with `pyalsaaudio`. **Phase 1 needs to be re-run
-with `pyalsaaudio` audio output to get a clean quality assessment.**
+All three backends evaluated on Pi with pyalsaaudio. Quality outstanding
+across the board. No OOM risk (all under 61 MB RSS).
 
-1. Install `pyalsaaudio` on Pi (see `profiling-pi/venv.md`)
-2. Re-run: `python mvp-modules/archive/tts_evaluation/compare_tts.py --deepgram-only`
-   - Audio output now uses `pyalsaaudio` (direct ALSA) — no tearing expected
-   - Confirm clean audio through 3.5mm jack
-   - Measure per-sentence latency
-3. Memory check: RSS must stay well under 700 MB total (session 1: 66 MB — passed)
+| Backend | Avg first-chunk | Streaming | Notes |
+|---------|-----------------|-----------|-------|
+| Deepgram | 2642ms | No (REST) | Same API key as STT |
+| ElevenLabs | 486ms (warm) | Yes | 2.8s cold start, then excellent |
+| Cartesia | 1043ms | Yes | Rushed pacing (tunable) |
 
-If per-chunk latency ≤ 800ms and quality is acceptable → proceed to Phase 3.
-If latency > 800ms → proceed to Phase 2a (ElevenLabs).
+Decision: keep all three as selectable `TTSBackend` modules.
+See `effort_log.md` for full results and `session_3_wrap.md` for details.
 
-### Phase 2a — ElevenLabs (Pi run, only if Phase 1 marginal)
+### Current phase — Tuning (session 4)
 
-`ElevenLabsTTS` is already written in `src/tts.py`. Account already created.
+See `tuning_plan.md` for the full spec. Summary:
 
-1. `pip install elevenlabs` in Pi venv
-2. Add `ELEVENLABS_API_KEY` to `.env` on Pi
-3. Same standalone tests as Phase 1
-4. Compare first-chunk latency vs Deepgram — Flash v2.5 targets ~75ms
+1. Wire tuning controls into `compare_tts.py` (Cartesia speed/emotion,
+   ElevenLabs voice_settings/optimize_latency)
+2. Fix Katie's rushed cadence via `generation_config.speed`
+3. Warm-start investigation: back-to-back short sentences, idle gaps
+4. ALSA leading-truncation fix (silence pre-fill)
+5. Propagate proven settings into production `TTSBackend` classes
 
-If latency acceptable → proceed to Phase 3 with ElevenLabs.
-If latency still marginal → proceed to Phase 2b.
+### Phase 3 — Integrated test (Pi run, after tuning)
 
-### Phase 2b — Cartesia (Pi run, only if Phase 2a also marginal)
+1. In `master.py`: replace `PiperTTS(...)` with selected backend
+2. Full cognitive turn: wake → STT → agent → TTS → back to wake_listen
+3. Confirm: time-to-first-audio < 2s, no OOM, clean Ctrl+C, multi-turn
 
-`CartesiaTTS` is already written in `src/tts.py`.
+### Phase 4 — Cleanup
 
-1. `pip install cartesia` in Pi venv
-2. Create Cartesia account; add `CARTESIA_API_KEY` to `.env` on Pi
-3. Same standalone tests as Phase 1
-4. Compare first-chunk latency vs Deepgram and ElevenLabs
-
-### Phase 3 — Integrated test (Pi run)
-
-1. In `master.py`: replace `PiperTTS(...)` instantiation with selected backend
-2. Run full cognitive turn: wake → STT → agent → TTS → back to wake_listen
-3. Confirm:
-   - Time from VAD_STOPPED to first audio (target < 2s with live-sentence streaming)
-   - No OOM during synthesis
-   - Clean Ctrl+C from wake_listen after turn
-   - Multi-turn: 2–3 consecutive turns without degradation
-
-### Phase 4 — Decision and cleanup
-
-1. Mark selected backend as default in `mvp-modules/forked_assistant/src/tts.py`;
-   comment `PiperTTS` as archived
-2. Update `effort_log.md` (this folder) with latency measurements and decision rationale
-3. Update `mvp-modules/forked_assistant/AGENTS.md` — What's Next to step 9 validation
-4. Update `mvp-modules/forked_assistant/spec/implementation_framework.md` — step 8 complete
-5. Update `mvp-modules/memory/architecture_decisions.md` — TTS section with final decision
+1. All three backends as selectable modules in `src/tts.py`
+2. Update `effort_log.md` with tuning results and final configuration
+3. Update `forked_assistant/AGENTS.md` — step 9 validation
+4. Update `memory/architecture_decisions.md` — TTS section
 
 ## Evaluation Criteria
 
@@ -164,14 +144,14 @@ If latency still marginal → proceed to Phase 2b.
 ```
 tts_evaluation/
 ├── AGENTS.md                ← you are here
-├── compare_tts.py           ← standalone comparison harness (Phase 1/2 runs)
+├── compare_tts.py           ← standalone comparison harness (tuning sandbox)
 ├── replay_wav.py            ← WAV replay tool: PyAudio sweep, pyalsaaudio, aplay modes
 ├── effort_log.md            ← running session log: findings, measurements, decisions
-├── session_1_wrap.md        ← session 1 summary: setup, Phase 1 results, tearing found
-├── session_2_wrap.md        ← session 2 summary: tearing root cause confirmed, pyalsaaudio fix
-├── deepgram_tts_notes.md    ← Deepgram Aura API reference, voice controls, SDK patterns
-├── elevenlabs_notes.md      ← ElevenLabs evaluation notes (create when Phase 2a runs)
-└── cartesia_notes.md        ← Cartesia evaluation notes (create if Phase 2b runs)
+├── tuning_plan.md           ← session 4 spec: tuning controls, warm-start, ALSA fix
+├── session_1_wrap.md        ← session 1: setup, Phase 1 results, tearing found
+├── session_2_wrap.md        ← session 2: tearing root cause confirmed, pyalsaaudio fix
+├── session_3_wrap.md        ← session 3: Phase 1 re-run, Phase 2 complete, decision
+└── deepgram_tts_notes.md    ← Deepgram Aura API reference, voice controls, SDK patterns
 ```
 
 ## Key Files Outside This Folder
@@ -192,7 +172,7 @@ Paths are relative to the repo root (`raspberry-ai/`). This folder lives at
 - **Device:** Raspberry Pi 4 Model B, 1 GB RAM, quad-core ARM Cortex-A72
 - **Audio output:** bcm2835 headphones (3.5mm jack), ALSA `hw:0,0`, S16_LE
   - Uses `pyalsaaudio` (direct `snd_pcm_writei()`); PyAudio/PortAudio rejected (tearing)
-- **Python venv:** `~/pipecat-agent/venv/` — `deepgram-sdk` already installed
+- **Python venv:** `~/deepgram-benchmark-venv/` — scratch venv with deepgram-sdk, elevenlabs, cartesia==3.0.2
 - **Process:** TTS runs in master process (cores 1–3); recorder child on core 0 in idle phase
 - **No process breakout needed:** cloud TTS is HTTP API calls — no ONNX, no memory pressure
 - **OWW/Silero gated off** during TTS (idle phase bracket; confirmed 2026-04-04)
