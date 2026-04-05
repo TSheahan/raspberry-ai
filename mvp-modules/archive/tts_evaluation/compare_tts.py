@@ -35,6 +35,13 @@ Options:
     --cartesia-model NAME   Cartesia model ID, default: sonic-3
     --cartesia-voice-id ID  Cartesia voice UUID (required for Cartesia runs)
     --cartesia-rate HZ      Cartesia PCM sample rate, default: 22050
+    --cartesia-speed FLOAT  Cartesia speed 0.6–1.5 (default: 1.0; try 0.85 for Katie)
+    --cartesia-emotion NAME Cartesia emotion (Happy, Calm, Angry, etc.)
+    --cartesia-buffer-delay MS  max_buffer_delay_ms 0–5000 (default: 3000)
+    --el-speed FLOAT        ElevenLabs speed 0.25–4 (default: 1.0)
+    --el-stability FLOAT    ElevenLabs stability 0–1
+    --el-similarity FLOAT   ElevenLabs similarity_boost 0–1
+    --el-optimize-latency INT  ElevenLabs optimize_streaming_latency 0–4
 
 Measurements per sentence per backend:
     latency_ms   Time from API call start to first audio byte received
@@ -113,6 +120,7 @@ class _AudioOut:
         self._device = None
         self._pa = None
         self._stream = None
+        self._primed = False
 
         if self._use_alsa:
             import alsaaudio
@@ -138,6 +146,10 @@ class _AudioOut:
             logger.debug("[audio] PyAudio opened (Windows fallback)  rate={}", sample_rate)
 
     def write(self, pcm: bytes) -> None:
+        if not self._primed and self._device is not None:
+            silence = b"\x00" * (_ALSA_PERIOD * 2)  # one period, S16LE = 2 bytes/sample
+            self._device.write(silence)
+            self._primed = True
         if self._device is not None:
             self._device.write(pcm)
         elif self._stream is not None:
@@ -258,6 +270,9 @@ def _run_cartesia_sentence(
     model: str,
     voice_id: str,
     sample_rate: int,
+    speed: float | None = None,
+    emotion: str | None = None,
+    buffer_delay_ms: int | None = None,
     save_path: Path | None = None,
 ) -> dict:
     """Synthesise `text` via Cartesia WebSocket and play through ALSA device 0."""
@@ -274,7 +289,7 @@ def _run_cartesia_sentence(
     out = _AudioOut(sample_rate)
     try:
         with client.tts.websocket_connect() as connection:
-            connection.send({
+            send_payload: dict = {
                 "context_id": "eval",
                 "model_id": model,
                 "transcript": text,
@@ -284,7 +299,17 @@ def _run_cartesia_sentence(
                     "encoding": "pcm_s16le",
                     "sample_rate": sample_rate,
                 },
-            })
+            }
+            gen_cfg: dict = {}
+            if speed is not None:
+                gen_cfg["speed"] = speed
+            if emotion is not None:
+                gen_cfg["emotion"] = emotion
+            if gen_cfg:
+                send_payload["generation_config"] = gen_cfg
+            if buffer_delay_ms is not None:
+                send_payload["max_buffer_delay_ms"] = buffer_delay_ms
+            connection.send(send_payload)
             for response in connection:
                 if response.type == "chunk" and response.audio:
                     if first_chunk_ms is None:
@@ -329,6 +354,9 @@ def _run_cartesia(
     model: str,
     voice_id: str,
     sample_rate: int,
+    speed: float | None = None,
+    emotion: str | None = None,
+    buffer_delay_ms: int | None = None,
     save_dir: Path | None = None,
     sentence_offset: int = 0,
 ) -> list[dict]:
@@ -347,12 +375,17 @@ def _run_cartesia(
         return []
 
     client = Cartesia(api_key=api_key)
-    logger.info("[cartesia] starting  model={}  voice={}  sentences={}", model, voice_id, len(sentences))
+    logger.info("[cartesia] starting  model={}  voice={}  speed={}  emotion={}  sentences={}",
+                model, voice_id, speed, emotion, len(sentences))
 
     results = []
     for i, text in enumerate(sentences):
         save_path = save_dir / f"cartesia_{sentence_offset + i:02d}.wav" if save_dir else None
-        row = _run_cartesia_sentence(text, client, model, voice_id, sample_rate, save_path=save_path)
+        row = _run_cartesia_sentence(
+            text, client, model, voice_id, sample_rate,
+            speed=speed, emotion=emotion, buffer_delay_ms=buffer_delay_ms,
+            save_path=save_path,
+        )
         if row:
             results.append(row)
     return results
@@ -367,6 +400,10 @@ def _run_elevenlabs_sentence(
     client,
     voice_id: str,
     model: str,
+    speed: float | None = None,
+    stability: float | None = None,
+    similarity: float | None = None,
+    optimize_latency: int | None = None,
     save_path: Path | None = None,
 ) -> dict:
     """Synthesise `text` via ElevenLabs streaming and play through ALSA device 0."""
@@ -382,12 +419,24 @@ def _run_elevenlabs_sentence(
     pcm_buffer: list[bytes] = []
     out = _AudioOut(ELEVENLABS_SAMPLE_RATE)
     try:
-        audio_stream = client.text_to_speech.stream(
-            voice_id=voice_id,
-            text=text,
-            model_id=model,
-            output_format="pcm_24000",
-        )
+        stream_kwargs: dict = {
+            "voice_id": voice_id,
+            "text": text,
+            "model_id": model,
+            "output_format": "pcm_24000",
+        }
+        voice_settings: dict = {}
+        if speed is not None:
+            voice_settings["speed"] = speed
+        if stability is not None:
+            voice_settings["stability"] = stability
+        if similarity is not None:
+            voice_settings["similarity_boost"] = similarity
+        if voice_settings:
+            stream_kwargs["voice_settings"] = voice_settings
+        if optimize_latency is not None:
+            stream_kwargs["optimize_streaming_latency"] = optimize_latency
+        audio_stream = client.text_to_speech.stream(**stream_kwargs)
         for pcm_chunk in audio_stream:
             if pcm_chunk:
                 if first_chunk_ms is None:
@@ -424,6 +473,10 @@ def _run_elevenlabs(
     sentences: list[str],
     voice_id: str,
     model: str,
+    speed: float | None = None,
+    stability: float | None = None,
+    similarity: float | None = None,
+    optimize_latency: int | None = None,
     save_dir: Path | None = None,
     sentence_offset: int = 0,
 ) -> list[dict]:
@@ -439,12 +492,17 @@ def _run_elevenlabs(
         return []
 
     client = ElevenLabs(api_key=api_key)
-    logger.info("[elevenlabs] starting  model={}  voice={}  sentences={}", model, voice_id, len(sentences))
+    logger.info("[elevenlabs] starting  model={}  voice={}  speed={}  opt_latency={}  sentences={}",
+                model, voice_id, speed, optimize_latency, len(sentences))
 
     results = []
     for i, text in enumerate(sentences):
         save_path = save_dir / f"elevenlabs_{sentence_offset + i:02d}.wav" if save_dir else None
-        row = _run_elevenlabs_sentence(text, client, voice_id, model, save_path=save_path)
+        row = _run_elevenlabs_sentence(
+            text, client, voice_id, model,
+            speed=speed, stability=stability, similarity=similarity,
+            optimize_latency=optimize_latency, save_path=save_path,
+        )
         if row:
             results.append(row)
     return results
@@ -543,6 +601,20 @@ def _parse_args() -> argparse.Namespace:
                    help="Cartesia voice UUID — find one at https://play.cartesia.ai/voices")
     p.add_argument("--cartesia-rate", type=int, default=CARTESIA_SAMPLE_RATE, metavar="HZ",
                    help=f"Cartesia PCM sample rate (default: {CARTESIA_SAMPLE_RATE})")
+    p.add_argument("--cartesia-speed", type=float, default=None, metavar="FLOAT",
+                   help="Cartesia speed 0.6–1.5 (default: 1.0; try 0.85 for Katie)")
+    p.add_argument("--cartesia-emotion", default=None, metavar="NAME",
+                   help="Cartesia emotion (Happy, Calm, Angry, etc.)")
+    p.add_argument("--cartesia-buffer-delay", type=int, default=None, metavar="MS",
+                   help="Cartesia max_buffer_delay_ms 0–5000 (default: 3000)")
+    p.add_argument("--el-speed", type=float, default=None, metavar="FLOAT",
+                   help="ElevenLabs speed 0.25–4 (default: 1.0)")
+    p.add_argument("--el-stability", type=float, default=None, metavar="FLOAT",
+                   help="ElevenLabs stability 0–1")
+    p.add_argument("--el-similarity", type=float, default=None, metavar="FLOAT",
+                   help="ElevenLabs similarity_boost 0–1")
+    p.add_argument("--el-optimize-latency", type=int, default=None, metavar="INT",
+                   help="ElevenLabs optimize_streaming_latency 0–4")
     return p.parse_args()
 
 
@@ -578,7 +650,12 @@ def main() -> None:
         if run_elevenlabs:
             if active_backends:
                 time.sleep(args.pause)
-            rows = _run_elevenlabs([text], voice_id=args.el_voice_id, model=args.el_model, save_dir=save_dir, sentence_offset=i)
+            rows = _run_elevenlabs(
+                [text], voice_id=args.el_voice_id, model=args.el_model,
+                speed=args.el_speed, stability=args.el_stability,
+                similarity=args.el_similarity, optimize_latency=args.el_optimize_latency,
+                save_dir=save_dir, sentence_offset=i,
+            )
             all_results.extend(rows)
             if rows:
                 active_backends.append("elevenlabs")
@@ -591,6 +668,8 @@ def main() -> None:
                 model=args.cartesia_model,
                 voice_id=args.cartesia_voice_id,
                 sample_rate=args.cartesia_rate,
+                speed=args.cartesia_speed, emotion=args.cartesia_emotion,
+                buffer_delay_ms=args.cartesia_buffer_delay,
                 save_dir=save_dir,
                 sentence_offset=i,
             )

@@ -30,6 +30,11 @@ required once the new backend satisfies the `TTSBackend` interface.
 
 ```python
 class TTSBackend(ABC):
+    def warm(self) -> None:
+        """Prime network connection and server-side model. Audio discarded.
+        Call once after construction, ideally during a non-blocking window.
+        Default: no-op. Override per-backend."""
+
     def play(self, text_chunks: Iterator[str]) -> None:
         """Synthesise and play each chunk through ALSA device 0. Blocks until done."""
         ...
@@ -38,6 +43,13 @@ class TTSBackend(ABC):
         """Release audio I/O resources. Call once at process exit."""
         ...
 ```
+
+`warm()` should:
+- Be called once after construction, before the first `play()` call
+- Send a minimal throwaway synthesis (e.g. `"."`) to prime TCP/TLS + server-side model
+- Discard all audio bytes — no `_AudioOut` needed
+- Be non-fatal — log and continue if the warm-up request fails
+- Be called from `master.py` during a non-blocking window (e.g. during STT or agent init)
 
 `play()` must:
 - Accept `Iterator[str]` of sentence-boundary-aligned chunks (from `agent_session.run()`)
@@ -105,22 +117,41 @@ across the board. No OOM risk (all under 61 MB RSS).
 Decision: keep all three as selectable `TTSBackend` modules.
 See `effort_log.md` for full results and `session_3_wrap.md` for details.
 
-### Current phase — Tuning (session 4)
+### Phase — Tuning (session 4) — complete
 
-See `tuning_plan.md` for the full spec. Summary:
+See `tuning_plan.md` and `session_4_wrap.md` for details. Summary:
 
-1. Wire tuning controls into `compare_tts.py` (Cartesia speed/emotion,
-   ElevenLabs voice_settings/optimize_latency)
-2. Fix Katie's rushed cadence via `generation_config.speed`
-3. Warm-start investigation: back-to-back short sentences, idle gaps
-4. ALSA leading-truncation fix (silence pre-fill)
-5. Propagate proven settings into production `TTSBackend` classes
+1. Tuning controls wired into `compare_tts.py` (Cartesia speed/emotion/buffer_delay,
+   ElevenLabs speed/stability/similarity/optimize_latency)
+2. Katie cadence fixed: `generation_config.speed = 0.85` confirmed natural
+3. Warm-start measured: ElevenLabs 367ms avg, Cartesia 1090ms, Deepgram 1148ms
+4. ALSA leading-truncation fixed: silence pre-fill in `_AudioOut` — confirmed clean
+5. Tuning controls propagated into production `TTSBackend` classes in `src/tts.py`
+6. `warm()` method added to `TTSBackend` ABC + all three implementations
 
-### Phase 3 — Integrated test (Pi run, after tuning)
+### Phase — Voice audition (session 5) — complete
+
+Cartesia voice audition: shortlist Katie / Allie / Kayla. Two rounds (short sentence
+at 0.85; expressive long-form monologue at 1.0 and 0.85). Allie selected.
+
+**Final voice selections:**
+
+| Backend | Voice | ID | Speed default |
+|---------|-------|----|---------------|
+| Cartesia | Allie — Natural Conversationalist | `2747b6cf-fa34-460c-97db-267566918881` | 0.85 |
+| ElevenLabs | Matilda — Knowledgeable, Professional | `XrExE9yKIg1WjnnlVkGX` | 0.85 |
+| Deepgram | Helena — Caring, Natural, Positive | `aura-2-helena-en` | 1.05 |
+
+**Platform precedence:** Cartesia (primary) → ElevenLabs (fallback) → Deepgram (tertiary).
+Defaults propagated into `src/tts.py`. See `voice_tuning_results.md` for full rationale.
+
+### Phase 3 — Integrated test (Pi run, next session)
 
 1. In `master.py`: replace `PiperTTS(...)` with selected backend
-2. Full cognitive turn: wake → STT → agent → TTS → back to wake_listen
-3. Confirm: time-to-first-audio < 2s, no OOM, clean Ctrl+C, multi-turn
+2. Call `tts.warm()` during a non-blocking window (STT phase or agent init)
+3. Full cognitive turn: wake → STT → agent → TTS → back to wake_listen
+4. Confirm: time-to-first-audio < 2s, no OOM, clean Ctrl+C, multi-turn
+5. Measure warm() vs no-warm() first-turn latency delta
 
 ### Phase 4 — Cleanup
 
@@ -143,15 +174,18 @@ See `tuning_plan.md` for the full spec. Summary:
 
 ```
 tts_evaluation/
-├── AGENTS.md                ← you are here
-├── compare_tts.py           ← standalone comparison harness (tuning sandbox)
-├── replay_wav.py            ← WAV replay tool: PyAudio sweep, pyalsaaudio, aplay modes
-├── effort_log.md            ← running session log: findings, measurements, decisions
-├── tuning_plan.md           ← session 4 spec: tuning controls, warm-start, ALSA fix
-├── session_1_wrap.md        ← session 1: setup, Phase 1 results, tearing found
-├── session_2_wrap.md        ← session 2: tearing root cause confirmed, pyalsaaudio fix
-├── session_3_wrap.md        ← session 3: Phase 1 re-run, Phase 2 complete, decision
-└── deepgram_tts_notes.md    ← Deepgram Aura API reference, voice controls, SDK patterns
+├── AGENTS.md                  ← you are here
+├── compare_tts.py             ← standalone comparison harness (tuning sandbox)
+├── replay_wav.py              ← WAV replay tool: PyAudio sweep, pyalsaaudio, aplay modes
+├── effort_log.md              ← running session log: findings, measurements, decisions
+├── tuning_plan.md             ← session 4 spec (complete): tuning controls, warm-start, ALSA fix
+├── voice_tuning_brief.md      ← standalone brief for interactive voice tuning sessions
+├── voice_tuning_results.md    ← results skeleton: per-backend trial tables
+├── session_1_wrap.md          ← session 1: setup, Phase 1 results, tearing found
+├── session_2_wrap.md          ← session 2: tearing root cause confirmed, pyalsaaudio fix
+├── session_3_wrap.md          ← session 3: Phase 1 re-run, Phase 2 complete, decision
+├── session_4_wrap.md          ← session 4: tuning controls, cadence fix, warm-start, warm() API
+└── deepgram_tts_notes.md      ← Deepgram Aura API reference, voice controls, SDK patterns
 ```
 
 ## Key Files Outside This Folder

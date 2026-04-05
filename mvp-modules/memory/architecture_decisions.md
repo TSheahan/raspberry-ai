@@ -245,7 +245,7 @@ Each call processes one 1280-sample (80ms) chunk. Calls fire every 4 audio frame
 
 ## TTS Rearchitecture — Step 8/9 Prerequisite
 
-**Status: evaluation in progress. Active work folder: `mvp-modules/archive/tts_evaluation/`.**
+**Status: evaluation and tuning complete (sessions 1–5, 2026-04-05). Ready for Phase 3 integrated test.**
 
 **Root cause for replacement:** `PiperTTS` (EU-7, proven 2026-04-04) has two independent
 failures on 1 GB Pi 4:
@@ -256,25 +256,38 @@ failures on 1 GB Pi 4:
 
 Either condition independently blocks step 8 delivery.
 
-**Interface contract:** `TTSBackend.play(Iterator[str]) -> None` — any backend that
-accepts sentence-aligned chunks (from `agent_session.run()`) and plays audio through
-PyAudio device 0 satisfies the `master.py` call site without changes to master.py.
-Abstract class lives in `forked_assistant/src/tts.py`.
+**Interface contract:** `TTSBackend` ABC in `forked_assistant/src/tts.py`:
+- `warm() -> None` — prime connection; call once during non-blocking window (STT/agent init)
+- `play(Iterator[str]) -> None` — accepts sentence-aligned chunks; plays via pyalsaaudio ALSA hw:0,0; blocks until done
+- `close() -> None` — release resources at process exit
+
+Audio output uses `pyalsaaudio` (direct `snd_pcm_writei()`). PyAudio/PortAudio rejected:
+PortAudio's callback thread gets descheduled on Pi 4 ARM causing hardware buffer underruns
+(confirmed session 2, 2026-04-05).
 
 **No process breakout needed:** Cloud TTS runs HTTP API calls in master process
 (cores 1–3). No ONNX loaded on master. OWW/Silero are gated off during TTS (idle phase
 bracket). Memory pressure from Piper ONNX is eliminated entirely.
 
-**Candidates:**
-- **Deepgram Aura** — REST API, `DEEPGRAM_API_KEY` already in `.env`; `linear16` encoding
-  avoids decode overhead; REST-only until streaming GA; evaluate first (no new setup)
-- **Cartesia** — streaming TTS, sub-200ms first-chunk latency; `CARTESIA_API_KEY` needed;
-  evaluate if Deepgram per-sentence latency is marginal (> 800ms)
+**Platform precedence and selected voices (sessions 3–5, 2026-04-05):**
+
+| Priority | Backend | Voice | Speed tiers (Short/Medium/Long) | Role |
+|----------|---------|-------|---------------------------------|------|
+| 1 | Cartesia | Allie (`2747b6cf-fa34-460c-97db-267566918881`) | 0.85 / 1.0 / 1.2 | Primary |
+| 2 | ElevenLabs | Matilda (`XrExE9yKIg1WjnnlVkGX`) | 0.85 / 1.16 / 1.2 | Fallback |
+| 3 | Deepgram | Helena (`aura-2-helena-en`) | 1.05 / 1.2 / 1.4 | Tertiary |
+
+Defaults are wired into `tts.py` — `CartesiaTTS()` requires no arguments.
+
+**Deepgram notes:** REST-only (full audio fetched before playback); starting-click
+artifact unresolved; pronunciation control (inline IPA) available but deferred.
+Unsuitable as primary due to latency scaling with content length.
 
 **Evaluation folder:** `mvp-modules/archive/tts_evaluation/`
-- `AGENTS.md` — evaluation guide, interface contract, sequence, criteria
-- `effort_log.md` — running session log with measurements and decision record
-- `deepgram_tts_notes.md` — Deepgram Aura API reference, voice controls, SDK patterns
+- `AGENTS.md` — evaluation guide, interface contract, session history
+- `effort_log.md` — running session log with all measurements and decisions
+- `voice_tuning_results.md` — final voice selections, speed tiers, platform precedence
+- `deepgram_tts_notes.md` — Deepgram Aura API reference, pronunciation control syntax
 
 ---
 

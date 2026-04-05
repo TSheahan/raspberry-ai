@@ -1,4 +1,13 @@
-# TTS Tuning Plan — Session 4
+# TTS Tuning Plan — Session 4 (complete)
+
+## Status: DONE (2026-04-05)
+
+All items complete. Results in `session_4_wrap.md`. Key outcomes:
+- Cartesia speed 0.85 confirmed natural for Katie
+- ALSA silence pre-fill fixes leading truncation
+- `warm()` added to `TTSBackend` ABC + all implementations
+- ElevenLabs warm-start avg 367ms; no cold-start recurrence at 0.5s intervals
+- Next: wire `tts.warm()` call into `master.py` (Phase 3)
 
 ## Goal
 

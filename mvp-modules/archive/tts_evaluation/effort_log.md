@@ -251,3 +251,84 @@ surface. Subscription surprises or other contingencies could force a change.
 Proceed to tuning phase: voice selection, cadence control, warm-start latency
 optimisation across all three backends. `compare_tts.py` is the sandbox.
 See `tuning_plan.md` for the spec.
+
+---
+
+## Session 5 — Voice audition and speed tier review (2026-04-05)
+
+### Cartesia voice audition
+
+Shortlist recovered after crash: Katie, Allie, Kayla. Voice IDs retrieved via
+Cartesia API (`voices.list()`).
+
+| Voice | ID |
+|-------|----|
+| Katie — Friendly Fixer | `f786b574-daa5-4673-aa0c-cbe3e8534c02` |
+| Allie — Natural Conversationalist | `2747b6cf-fa34-460c-97db-267566918881` |
+| Kayla — Easygoing Pal | `1ac31ebd-9113-405b-9d80-4a4bbbeea91c` |
+
+Round 1 — short sentence at speed 0.85 (all three):
+
+| Voice | First chunk | Audio |
+|-------|-------------|-------|
+| Katie | 1224ms | 98 KB |
+| Allie | 1207ms | 94 KB |
+| Kayla | 1064ms | 104 KB |
+
+Round 2 — bagel monologue at speed 1.0 (all three). Kayla eliminated.
+
+Round 3 — bagel monologue at speed 0.85 (Katie vs Allie):
+
+| Voice | First chunk | Audio |
+|-------|-------------|-------|
+| Katie | 1327ms | 870 KB |
+| Allie | 1263ms | 1080 KB |
+
+**Selected: Allie.** Friendly diction; naturally slower base cadence than Katie
+(more audio at same speed setting — gives ellipses and rhythm more space).
+Katie retained as runner-up.
+
+### ElevenLabs voice model review
+
+Re-ran shortlist (Matilda, Rachel, Jessica, Sarah) plus Cartesia/Allie as
+reference, short sentence at 0.85. No changes — Matilda confirmed as selection.
+Rachel retained as runner-up.
+
+### Speed tier review and cross-platform consistency check
+
+Tier nomenclature standardised to Short / Medium / Long (was Default/Bulk/Heavy bulk
+and Default/Mid/Fallback). Fallback demoted to inline annotation on a tier.
+
+Cross-platform consistency verified by listening (Short sentence, Medium bagel quote,
+Long bagel quote) on Cartesia/Allie and ElevenLabs/Matilda in sequence:
+
+| Tier | Cartesia speed | ElevenLabs speed | Verdict |
+|------|----------------|------------------|---------|
+| Short | 0.85 | 0.85 | Consistent ✓ |
+| Medium | 1.0 | 1.16 | Consistent ✓ |
+| Long | 1.2 | 1.2 | Consistent ✓ |
+
+Note: ElevenLabs Medium sits at 1.16 vs Cartesia 1.0 because Matilda's voice character
+reads as more relaxed at equivalent speed values — the perceived pace matches.
+ElevenLabs Long aligned to 1.2 (was previously labelled "API ceiling only" — confirmed
+as the correct Long tier value, same as Cartesia).
+
+### Platform precedence established
+
+| Priority | Backend | Voice | Role |
+|----------|---------|-------|------|
+| 1 | Cartesia | Allie | Primary |
+| 2 | ElevenLabs | Matilda | Fallback |
+| 3 | Deepgram | Helena | Tertiary |
+
+Deepgram speed tiers carried from Thalia evaluation; not re-validated with Helena
+(P3 — effort stops here). Pronunciation control (inline IPA) annotated and deferred.
+
+### Code changes
+
+| File | Change |
+|------|--------|
+| `src/tts.py` | Module docstring updated with precedence order. `CartesiaTTS`: `_DEFAULT_VOICE_ID` = Allie, `_DEFAULT_SPEED` = 0.85, constructor defaults set. `ElevenLabsTTS`: `_DEFAULT_VOICE_ID` = Matilda. `DeepgramTTS`: `_DEFAULT_MODEL` = Helena, `_DEFAULT_SPEED` = 1.05. Section headers relabelled PRIMARY / FALLBACK / TERTIARY. |
+| `voice_tuning_results.md` | Platform precedence table added. Actionable settings expanded. Speed tiers renamed Short/Medium/Long. Deepgram pronunciation annotation added. Cartesia section header corrected to Allie. |
+| `voice_tuning_brief.md` | Voice IDs table expanded with all Cartesia shortlist + selection markers. |
+| `AGENTS.md` | Voice audition phase marked complete. Final selections and precedence recorded. |

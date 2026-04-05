@@ -4,14 +4,21 @@ tts.py — TTS backends for forked_assistant (step 8).
 Architecture
 ------------
 TTSBackend (abstract)
+    warm() -> None                — prime connection; call once during non-blocking window
     play(Iterator[str]) -> None   — synthesise and play sentence chunks; blocks until done
     close() -> None               — release audio resources at process exit
 
+Backend precedence (evaluation complete 2026-04-05)
+----------------------------------------------------
+1. CartesiaTTS    — PRIMARY    — Allie (Natural Conversationalist); ~1.1s warm first-chunk
+2. ElevenLabsTTS  — FALLBACK   — Matilda; ~350ms warm first-chunk; excellent latency
+3. DeepgramTTS    — TERTIARY   — Helena; REST-only (full audio before playback); click artifact
+
 Implementations
-    PiperTTS        — local Piper ONNX (reference; unsuitable for 1 GB Pi 4 — see note)
-    DeepgramTTS     — Deepgram Aura REST API (Phase 1 evaluation candidate)
-    ElevenLabsTTS   — ElevenLabs streaming (Phase 2a candidate)
-    CartesiaTTS     — Cartesia WebSocket streaming (Phase 2b candidate)
+    CartesiaTTS     — Cartesia WebSocket streaming (primary; chosen voice: Allie)
+    ElevenLabsTTS   — ElevenLabs streaming (fallback; chosen voice: Matilda)
+    DeepgramTTS     — Deepgram Aura REST API (tertiary; chosen voice: Helena)
+    PiperTTS        — local Piper ONNX (archived; unsuitable for 1 GB Pi 4 — OOM + tearing)
 
 Audio output: pyalsaaudio (direct ALSA snd_pcm_writei) on Linux; PyAudio fallback
 on Windows for dev. PortAudio (PyAudio) causes tearing on bcm2835 due to its
@@ -19,7 +26,8 @@ internal callback thread getting descheduled on Pi 4 ARM — confirmed in
 tts_evaluation session 2 (2026-04-05). See _AudioOut class.
 
 Usage (from master.py):
-    tts = DeepgramTTS()               # or whichever backend is active
+    tts = CartesiaTTS()               # primary backend; defaults to Allie, speed 0.85
+    tts.warm()                        # call during STT/agent init to absorb cold-start
     tts.play(agent.run(transcript))   # blocks until all audio is played
     tts.close()                       # call once at process exit
 """
@@ -55,6 +63,7 @@ class _AudioOut:
         self._device = None
         self._pa = None
         self._stream = None
+        self._primed = False
 
         if self._use_alsa:
             import alsaaudio
@@ -79,6 +88,10 @@ class _AudioOut:
             )
 
     def write(self, pcm: bytes) -> None:
+        if not self._primed and self._device is not None:
+            silence = b"\x00" * (_ALSA_PERIOD * 2)  # one period, S16LE = 2 bytes/sample
+            self._device.write(silence)
+            self._primed = True
         if self._device is not None:
             self._device.write(pcm)
         elif self._stream is not None:
@@ -117,6 +130,22 @@ class TTSBackend(ABC):
     Windows for dev. See _AudioOut above.
     """
 
+    def warm(self) -> None:
+        """Prime the backend's network connection and server-side model.
+
+        Sends a minimal throwaway synthesis request — audio bytes are discarded.
+        Call once after construction, ideally during a non-blocking window (e.g.
+        while STT is transcribing) so the first real play() call doesn't pay
+        the cold-start penalty.
+
+        Measured cold-start costs (session 4 warm-start investigation):
+            ElevenLabs  ~2.8s first call → ~350ms after warm
+            Cartesia    ~1.3s first call → ~1.0s after warm
+            Deepgram    ~1.3s first call → ~1.0s after warm
+
+        Default implementation is a no-op. Override per-backend.
+        """
+
     @abstractmethod
     def play(self, text_chunks: Iterator[str]) -> None:
         """Synthesise and play each text chunk through ALSA device 0.
@@ -134,7 +163,7 @@ class TTSBackend(ABC):
 
 
 # ---------------------------------------------------------------------------
-# DeepgramTTS — active evaluation candidate
+# DeepgramTTS — tertiary backend (REST-only; starting-click artifact; Helena)
 # ---------------------------------------------------------------------------
 
 class DeepgramTTS(TTSBackend):
@@ -155,9 +184,9 @@ class DeepgramTTS(TTSBackend):
     Evaluation status: see archive/tts_evaluation/effort_log.md
     """
 
-    _DEFAULT_MODEL = "aura-2-thalia-en"
+    _DEFAULT_MODEL = "aura-2-helena-en"  # Helena — Caring, Natural, Positive (selected 2026-04-05)
     _DEFAULT_SAMPLE_RATE = 24000
-    _DEFAULT_SPEED = 0.9
+    _DEFAULT_SPEED = 1.05  # short-reply tier; see voice_tuning_results.md speed tiers
 
     def __init__(
         self,
@@ -175,6 +204,12 @@ class DeepgramTTS(TTSBackend):
             "[tts] DeepgramTTS ready  model={}  sample_rate={}  speed={}",
             model, sample_rate, speed,
         )
+
+    def warm(self) -> None:
+        logger.debug("[tts] DeepgramTTS warming up")
+        t0 = __import__("time").monotonic()
+        self._synthesise(".")
+        logger.info("[tts] DeepgramTTS warm  {:.0f}ms", (__import__("time").monotonic() - t0) * 1000)
 
     def play(self, text_chunks: Iterator[str]) -> None:
         """Synthesise each sentence chunk via Deepgram and play through ALSA device 0.
@@ -221,8 +256,24 @@ class DeepgramTTS(TTSBackend):
 
 
 # ---------------------------------------------------------------------------
-# CartesiaTTS — Phase 2 evaluation candidate (WebSocket streaming)
+# CartesiaTTS — PRIMARY backend (WebSocket streaming; Allie; speed 0.85 default)
 # ---------------------------------------------------------------------------
+
+class CartesiaEmotion:
+    """Valid emotion tags for the Cartesia generation_config.emotion field.
+
+    Not currently used by CartesiaTTS — the agent is the right place to
+    select emotion based on conversational context. Surfaced here so future
+    callers have a reference without digging through Cartesia docs.
+    """
+    NEUTRAL = None           # server default; no generation_config.emotion sent
+    HAPPY = "Happy"
+    CALM = "Calm"
+    ANGRY = "Angry"
+    SAD = "Sad"
+    CURIOUS = "Curious"
+    SURPRISED = "Surprised"
+
 
 class CartesiaTTS(TTSBackend):
     """Synthesise and play streamed text chunks via Cartesia WebSocket API.
@@ -240,19 +291,24 @@ class CartesiaTTS(TTSBackend):
         model       — Cartesia model ID (default: sonic-3)
         voice_id    — Cartesia voice UUID; find voices at https://play.cartesia.ai/voices
         sample_rate — PCM sample rate (default: 22050 Hz)
+        speed       — speaking rate 0.6–1.5 (default: None = server default 1.0)
+        emotion     — emotion tag (Happy, Calm, Angry, etc.; default: None = neutral)
 
     Evaluation status: see archive/tts_evaluation/effort_log.md Phase 2.
-    Activate only if Deepgram Phase 1 latency exceeds 800ms per sentence.
     """
 
     _DEFAULT_MODEL = "sonic-3"
     _DEFAULT_SAMPLE_RATE = 22050
+    _DEFAULT_VOICE_ID = "2747b6cf-fa34-460c-97db-267566918881"  # Allie — Natural Conversationalist
+    _DEFAULT_SPEED = 0.85  # proven cadence for short replies; see voice_tuning_results.md speed tiers
 
     def __init__(
         self,
-        voice_id: str,
+        voice_id: str = _DEFAULT_VOICE_ID,
         model: str = _DEFAULT_MODEL,
         sample_rate: int = _DEFAULT_SAMPLE_RATE,
+        speed: float | None = _DEFAULT_SPEED,
+        emotion: str | None = None,
     ) -> None:
         from cartesia import Cartesia  # type: ignore[import]
         api_key = os.environ["CARTESIA_API_KEY"]
@@ -260,10 +316,35 @@ class CartesiaTTS(TTSBackend):
         self._model = model
         self._voice_id = voice_id
         self._sample_rate = sample_rate
+        self._speed = speed
+        self._emotion = emotion
         logger.info(
-            "[tts] CartesiaTTS ready  model={}  voice={}  sample_rate={}",
-            model, voice_id, sample_rate,
+            "[tts] CartesiaTTS ready  model={}  voice={}  sample_rate={}  speed={}  emotion={}",
+            model, voice_id, sample_rate, speed, emotion,
         )
+
+    def warm(self) -> None:
+        logger.debug("[tts] CartesiaTTS warming up")
+        t0 = __import__("time").monotonic()
+        try:
+            with self._client.tts.websocket_connect() as connection:
+                connection.send({
+                    "context_id": "warm",
+                    "model_id": self._model,
+                    "transcript": ".",
+                    "voice": {"mode": "id", "id": self._voice_id},
+                    "output_format": {
+                        "container": "raw",
+                        "encoding": "pcm_s16le",
+                        "sample_rate": self._sample_rate,
+                    },
+                })
+                for response in connection:
+                    if response.type in ("done", "error"):
+                        break
+        except Exception:
+            logger.exception("[tts] CartesiaTTS warm-up failed (non-fatal)")
+        logger.info("[tts] CartesiaTTS warm  {:.0f}ms", (__import__("time").monotonic() - t0) * 1000)
 
     def play(self, text_chunks: Iterator[str]) -> None:
         """Synthesise each sentence chunk via Cartesia WebSocket and play through ALSA device 0."""
@@ -287,7 +368,7 @@ class CartesiaTTS(TTSBackend):
         try:
             bytes_written = 0
             with self._client.tts.websocket_connect() as connection:
-                connection.send({
+                payload: dict = {
                     "context_id": "tts",
                     "model_id": self._model,
                     "transcript": text,
@@ -297,7 +378,15 @@ class CartesiaTTS(TTSBackend):
                         "encoding": "pcm_s16le",
                         "sample_rate": self._sample_rate,
                     },
-                })
+                }
+                gen_cfg: dict = {}
+                if self._speed is not None:
+                    gen_cfg["speed"] = self._speed
+                if self._emotion is not None:
+                    gen_cfg["emotion"] = self._emotion
+                if gen_cfg:
+                    payload["generation_config"] = gen_cfg
+                connection.send(payload)
                 for response in connection:
                     if response.type == "chunk" and response.audio:
                         out.write(response.audio)
@@ -315,7 +404,7 @@ class CartesiaTTS(TTSBackend):
 
 
 # ---------------------------------------------------------------------------
-# ElevenLabsTTS — Phase 2 evaluation candidate (streaming, ~75ms first chunk)
+# ElevenLabsTTS — FALLBACK backend (streaming; Matilda; ~350ms warm first-chunk)
 # ---------------------------------------------------------------------------
 
 class ElevenLabsTTS(TTSBackend):
@@ -333,12 +422,14 @@ class ElevenLabsTTS(TTSBackend):
         voice_id    — ElevenLabs voice ID (default: Rachel, a warm neutral voice)
         model       — ElevenLabs model ID (default: eleven_flash_v2_5 — lowest latency)
         sample_rate — PCM sample rate; must match output_format (default: 24000)
+        voice_settings — dict with keys: speed, stability, similarity_boost, style,
+                         use_speaker_boost (all optional; omit for server defaults)
+        optimize_streaming_latency — 0–4 (default: None = server default)
 
     Evaluation status: see archive/tts_evaluation/effort_log.md Phase 2.
-    Activate only if Deepgram Phase 1 latency exceeds 800ms per sentence.
     """
 
-    _DEFAULT_VOICE_ID = "21m00Tcm4TlvDq8ikWAM"   # Rachel — calm, warm, neutral
+    _DEFAULT_VOICE_ID = "XrExE9yKIg1WjnnlVkGX"    # Matilda — Knowledgeable, Professional (selected 2026-04-05)
     _DEFAULT_MODEL = "eleven_flash_v2_5"           # ~75ms first-chunk latency
     _DEFAULT_SAMPLE_RATE = 24000                   # matches pcm_24000 output format
 
@@ -347,6 +438,8 @@ class ElevenLabsTTS(TTSBackend):
         voice_id: str = _DEFAULT_VOICE_ID,
         model: str = _DEFAULT_MODEL,
         sample_rate: int = _DEFAULT_SAMPLE_RATE,
+        voice_settings: dict | None = None,
+        optimize_streaming_latency: int | None = None,
     ) -> None:
         from elevenlabs.client import ElevenLabs  # type: ignore[import]
         api_key = os.environ["ELEVENLABS_API_KEY"]
@@ -354,10 +447,30 @@ class ElevenLabsTTS(TTSBackend):
         self._voice_id = voice_id
         self._model = model
         self._sample_rate = sample_rate
+        self._voice_settings = voice_settings
+        self._optimize_streaming_latency = optimize_streaming_latency
         logger.info(
-            "[tts] ElevenLabsTTS ready  model={}  voice={}  sample_rate={}",
-            model, voice_id, sample_rate,
+            "[tts] ElevenLabsTTS ready  model={}  voice={}  sample_rate={}  opt_latency={}",
+            model, voice_id, sample_rate, optimize_streaming_latency,
         )
+
+    def warm(self) -> None:
+        logger.debug("[tts] ElevenLabsTTS warming up")
+        t0 = __import__("time").monotonic()
+        try:
+            stream_kwargs: dict = {
+                "voice_id": self._voice_id,
+                "text": ".",
+                "model_id": self._model,
+                "output_format": "pcm_24000",
+            }
+            if self._optimize_streaming_latency is not None:
+                stream_kwargs["optimize_streaming_latency"] = self._optimize_streaming_latency
+            for _ in self._client.text_to_speech.stream(**stream_kwargs):
+                pass
+        except Exception:
+            logger.exception("[tts] ElevenLabsTTS warm-up failed (non-fatal)")
+        logger.info("[tts] ElevenLabsTTS warm  {:.0f}ms", (__import__("time").monotonic() - t0) * 1000)
 
     def play(self, text_chunks: Iterator[str]) -> None:
         """Synthesise each sentence chunk via ElevenLabs and play through ALSA device 0."""
@@ -379,12 +492,17 @@ class ElevenLabsTTS(TTSBackend):
     def _synthesise_to_output(self, text: str, out: _AudioOut) -> None:
         """Stream PCM bytes from ElevenLabs and write as they arrive."""
         try:
-            audio_stream = self._client.text_to_speech.stream(
-                voice_id=self._voice_id,
-                text=text,
-                model_id=self._model,
-                output_format="pcm_24000",
-            )
+            stream_kwargs: dict = {
+                "voice_id": self._voice_id,
+                "text": text,
+                "model_id": self._model,
+                "output_format": "pcm_24000",
+            }
+            if self._voice_settings:
+                stream_kwargs["voice_settings"] = self._voice_settings
+            if self._optimize_streaming_latency is not None:
+                stream_kwargs["optimize_streaming_latency"] = self._optimize_streaming_latency
+            audio_stream = self._client.text_to_speech.stream(**stream_kwargs)
             bytes_written = 0
             for pcm_chunk in audio_stream:
                 if pcm_chunk:
