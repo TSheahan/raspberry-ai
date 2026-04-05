@@ -301,7 +301,14 @@ class CartesiaTTS(TTSBackend):
                     if response.type == "chunk" and response.audio:
                         out.write(response.audio)
                         bytes_written += len(response.audio)
-                    elif response.done:
+                    elif response.type == "error":
+                        logger.error(
+                            "[tts] cartesia API error  status={}  error={!r}",
+                            getattr(response, "status_code", "?"),
+                            getattr(response, "error", "?"),
+                        )
+                        break
+                    elif response.type == "done":
                         break
             logger.debug("[tts] cartesia wrote {} bytes", bytes_written)
         except Exception:
