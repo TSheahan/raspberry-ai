@@ -18,7 +18,7 @@ Implementations
     CartesiaTTS     — Cartesia WebSocket streaming (primary; chosen voice: Allie)
     ElevenLabsTTS   — ElevenLabs streaming (fallback; chosen voice: Matilda)
     DeepgramTTS     — Deepgram Aura REST API (tertiary; chosen voice: Helena)
-    PiperTTS        — local Piper ONNX (archived; unsuitable for 1 GB Pi 4 — OOM + tearing)
+    PiperTTS        — local Piper ONNX (archived; too resource-intensive for 1 GB Pi 4)
 
 Audio output: pyalsaaudio (direct ALSA snd_pcm_writei) on Linux; PyAudio fallback
 on Windows for dev. PortAudio (PyAudio) causes tearing on bcm2835 due to its
@@ -517,20 +517,30 @@ class ElevenLabsTTS(TTSBackend):
 # PiperTTS — reference implementation (not suitable for 1 GB Pi 4)
 # ---------------------------------------------------------------------------
 
-class PiperTTS(TTSBackend):
-    """Synthesise and play streamed text chunks via Piper + PyAudio.
+_PIPER_MODEL_PATH = Path(os.path.expanduser(
+    os.environ.get("PIPER_MODEL_PATH", "~/piper-models/en_US-lessac-medium.onnx")
+))
 
-    ARCHIVED — not suitable for production on 1 GB Pi 4.
-    OOM kill observed: en_US-lessac-medium (~63 MB ONNX) exhausted total swap.
-    Audio tearing was also observed before the kill.
-    Retained as reference code; use DeepgramTTS or CartesiaTTS instead.
+
+class PiperTTS(TTSBackend):
+    """Synthesise and play streamed text chunks via local Piper ONNX inference.
+
+    ARCHIVED — too resource-intensive for practical use on a 1 GB Pi 4,
+    and noticeably lower voice quality compared to the cloud backends.
+    The 63 MB ONNX model loads successfully, but inference saturates all four
+    ARM cores and pushes RSS well past comfortable headroom. On longer text
+    (paragraph+), synthesis is slower than real-time and competes with the
+    rest of the pipeline for both CPU and memory. OOM kills were observed
+    under sustained load with swap pressure from other pipeline stages.
+
+    Retained as working reference code and for testing on beefier hardware.
+    Use CartesiaTTS, ElevenLabsTTS, or DeepgramTTS on the Pi instead.
 
     Loads the ONNX model once at construction. Each call to play() opens one
-    PyAudio output stream, synthesises all chunks, and closes the stream. The
-    PyAudio instance is reused across calls and terminated only on close().
+    audio output stream, synthesises all chunks, and closes the stream.
     """
 
-    def __init__(self, model_path: Path) -> None:
+    def __init__(self, model_path: Path = _PIPER_MODEL_PATH) -> None:
         from piper.voice import PiperVoice  # type: ignore[import]
         model_path = Path(os.path.expanduser(str(model_path)))
         logger.info("[tts] loading Piper model: {}", model_path)
@@ -540,14 +550,7 @@ class PiperTTS(TTSBackend):
                     self._sample_rate, model_path.name)
 
     def play(self, text_chunks: Iterator[str]) -> None:
-        """Synthesis disabled — drain the iterator and log text only."""
-        for chunk in text_chunks:
-            chunk = _strip_markdown(chunk)
-            if chunk:
-                logger.info("[tts:piper-stub] {}", chunk)
-        return
-
-        out = _AudioOut(self._sample_rate)  # noqa: unreachable
+        out = _AudioOut(self._sample_rate)
         try:
             for chunk in text_chunks:
                 chunk = _strip_markdown(chunk)
@@ -602,3 +605,46 @@ def _strip_markdown(text: str) -> str:
 def _monotonic() -> float:
     import time
     return time.monotonic()
+
+
+# ---------------------------------------------------------------------------
+# Standalone smoke test — python tts.py [--backend cartesia|elevenlabs|deepgram] [TEXT]
+# ---------------------------------------------------------------------------
+
+if __name__ == "__main__":
+    import argparse
+    import time
+
+    from dotenv import find_dotenv, load_dotenv
+
+    load_dotenv(find_dotenv(usecwd=True), override=True)
+
+    p = argparse.ArgumentParser(description="TTS smoke test — speak one sentence and exit.")
+    p.add_argument("text", nargs="?", default="Hello, how can I help you today?",
+                   help="Text to speak (default: greeting)")
+    p.add_argument("--backend", "-b", choices=["cartesia", "elevenlabs", "deepgram", "piper"],
+                   default="cartesia", help="TTS backend (default: cartesia)")
+    p.add_argument("--warm", action="store_true", help="Call warm() before play()")
+    args = p.parse_args()
+
+    backends = {
+        "cartesia": CartesiaTTS,
+        "elevenlabs": ElevenLabsTTS,
+        "deepgram": DeepgramTTS,
+        "piper": PiperTTS,
+    }
+
+    logger.info("[smoke] backend={}  warm={}  text={!r}", args.backend, args.warm, args.text)
+    tts = backends[args.backend]()
+
+    t0 = time.monotonic()
+    if args.warm:
+        tts.warm()
+        logger.info("[smoke] warm done  {:.0f}ms", (time.monotonic() - t0) * 1000)
+
+    t1 = time.monotonic()
+    tts.play(iter([args.text]))
+    logger.info("[smoke] play done  {:.0f}ms", (time.monotonic() - t1) * 1000)
+
+    tts.close()
+    logger.info("[smoke] total  {:.0f}ms", (time.monotonic() - t0) * 1000)

@@ -16,10 +16,11 @@ on core 0, then runs a synchronous event loop that:
 STT: Deepgram Nova-3 live WebSocket (Mixed mode — Silero VAD is authoritative
 dispatch trigger; Deepgram streams in parallel and accumulates is_final results).
 Agent: CursorAgentSession (~/.local/bin/agent, stream-json, session continuity).
-TTS: PiperTTS (Piper ONNX, bcm2835 headphones, device 0).
+TTS: CartesiaTTS (primary), ElevenLabsTTS (fallback), DeepgramTTS (tertiary).
+     Select via TTS_BACKEND env var; defaults to cartesia. See tts.py for details.
 
 Dependencies not in requirements.txt (already installed on Pi venv):
-  deepgram-sdk, python-dotenv, piper-tts
+  deepgram-sdk, python-dotenv, cartesia, elevenlabs
 
 Usage (on Pi with ReSpeaker):
     cd ~/raspberry-ai/mvp-modules/forked_assistant
@@ -47,7 +48,7 @@ from deepgram.core.events import EventType
 from log_config import configure_logging
 from agent_session import AgentSession, CursorAgentSession, AgentError
 from recorder_child import recorder_child_entry
-from tts import PiperTTS
+from tts import TTSBackend, CartesiaTTS, ElevenLabsTTS, DeepgramTTS
 from ring_buffer import (
     CHANNELS, SAMPLE_RATE,
     SHM_NAME, SHM_SIZE,
@@ -62,9 +63,13 @@ _AGENT_MODEL = os.environ.get("AGENT_MODEL", "claude-4.6-sonnet-medium")
 _AGENT_BIN = Path(os.environ.get("AGENT_BIN", str(Path.home() / ".local/bin/agent")))
 
 # --- TTS configuration (override via environment) ---
-_PIPER_MODEL_PATH = Path(os.path.expanduser(
-    os.environ.get("PIPER_MODEL_PATH", "~/piper-models/en_US-lessac-medium.onnx")
-))
+# TTS_BACKEND: cartesia (default/primary), elevenlabs (fallback), deepgram (tertiary)
+_TTS_BACKEND = os.environ.get("TTS_BACKEND", "cartesia").lower()
+_TTS_BACKENDS: dict[str, type[TTSBackend]] = {
+    "cartesia": CartesiaTTS,
+    "elevenlabs": ElevenLabsTTS,
+    "deepgram": DeepgramTTS,
+}
 
 # Deepgram keepalive: send every N seconds when ring write_pos has not advanced.
 # Deepgram closes the WebSocket with NET-0001 after 10 s of silence.
@@ -188,7 +193,7 @@ def _run_capture(
 # Cognitive loop — agent response + TTS output (EU-6/EU-7)
 # ---------------------------------------------------------------------------
 
-def cognitive_loop(transcript: str, agent: AgentSession, tts: PiperTTS) -> None:
+def cognitive_loop(transcript: str, agent: AgentSession, tts: TTSBackend) -> None:
     """Feed transcript to agent; synthesise and play each yielded sentence chunk."""
     if not transcript:
         logger.warning("no transcript — skipping cognitive loop")
@@ -260,7 +265,10 @@ def master_loop(pipe, shm: SharedMemory, child: Process) -> None:
         model=_AGENT_MODEL,
         agent_bin=_AGENT_BIN,
     )
-    tts = PiperTTS(_PIPER_MODEL_PATH)
+    if _TTS_BACKEND not in _TTS_BACKENDS:
+        raise RuntimeError(f"Unknown TTS_BACKEND={_TTS_BACKEND!r}; choose from {list(_TTS_BACKENDS)}")
+    tts = _TTS_BACKENDS[_TTS_BACKEND]()
+    tts.warm()
     processing = False
     wake_pos = 0
     capture: _CaptureSession | None = None

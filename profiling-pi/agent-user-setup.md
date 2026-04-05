@@ -1,14 +1,16 @@
 # Agent User Setup
 
-**Purpose:** Configure a dedicated `agent` Linux user to run the Cursor CLI subprocess in isolation. The voice assistant master process (`master.py`) runs as `user`; the Cursor CLI agent runs as `agent` via a narrow sudoers entry. See `mvp-modules/forked_assistant/archive/2026-04-04_privilege_separation_analysis.md` for the full design rationale.
+**Purpose:** Configure a dedicated `agent` Linux user to run the Cursor CLI subprocess in isolation. The voice assistant master process (`master.py`) runs as `voice`; the Cursor CLI agent runs as `agent` via a narrow sudoers entry. See `mvp-modules/forked_assistant/archive/2026-04-04_privilege_separation_analysis.md` for the full design rationale.
+
+**Prerequisite:** `voice-user-setup.md` must be completed first.
 
 ---
 
 ## Prerequisites
 
-- Cursor CLI already installed and authenticated for the `user` account (`~user/.local/bin/agent` exists, `~user/.cursor/` has valid credentials)
-- `user` is the voice assistant's Linux user (sudoer)
-- Run all commands below as `user` via `sudo` where required
+- `voice` user exists and is provisioned (see `voice-user-setup.md`)
+- `voice` has `sudo` access (for provisioning steps below)
+- Run all commands below as `voice` via `sudo` where required
 
 ---
 
@@ -27,7 +29,7 @@ sudo useradd -r -m -d /home/agent -s /usr/sbin/nologin agent
 
 ## 2. Install the Cursor CLI for `agent`
 
-`agent` owns the Cursor CLI install end-to-end. The `user` account does not need the binary.
+`agent` owns the Cursor CLI install end-to-end. The `voice` account does not need the binary.
 
 ```bash
 sudo -u agent -H bash -c 'curl https://cursor.com/install -fsS | bash'
@@ -45,7 +47,8 @@ sudo -u agent -H /home/agent/.local/bin/agent --version
 
 ## 3. Authenticate the Cursor CLI as `agent`
 
-Authentication is handled during installation (step 2) if the installer prompts for login. If not, authenticate separately:
+Authentication is handled during installation (step 2) if the installer prompts
+for login. If not, authenticate separately:
 
 ```bash
 # Temporarily allow a login shell for agent, authenticate, then restore
@@ -63,13 +66,13 @@ sudo -u agent -H /home/agent/.local/bin/agent status
 
 Expected: shows authenticated account and subscription.
 
-**Contingency:** root can access the binary at `/home/agent/.local/bin/agent` directly and re-authenticate if needed. `user` does not need access to it for normal operation.
+**Contingency:** root can access the binary at `/home/agent/.local/bin/agent` directly and re-authenticate if needed. `voice` does not need access to it for normal operation.
 
 ---
 
 ## 4. Set Up the Agent Workspace
 
-The agent operates on a checkout of `main` from `https://github.com/TSheahan/personal` (private repo). Authentication is via the GitHub CLI device flow — no password, no SSH key required.
+The agent operates on a checkout of `main` from `https://github.com/TSheahan/raspberry-ai`. Authentication is via the GitHub CLI device flow — no password, no SSH key required.
 
 ### 4a. Install and authenticate `gh` as `agent`
 
@@ -95,7 +98,7 @@ sudo -u agent -H gh auth status
 
 ```bash
 sudo -u agent -H gh auth setup-git
-sudo -u agent -H git clone https://github.com/TSheahan/personal /home/agent/personal
+sudo -u agent -H git clone https://github.com/TSheahan/raspberry-ai /home/agent/raspberry-ai
 ```
 
 `gh auth setup-git` persists the credential helper so subsequent `git pull` calls inside the checkout also authenticate without prompting.
@@ -105,7 +108,7 @@ sudo -u agent -H git clone https://github.com/TSheahan/personal /home/agent/pers
 ## 5. Add the Sudoers Entry
 
 ```bash
-echo 'user ALL=(agent) NOPASSWD: /home/agent/.local/bin/agent' | \
+echo 'voice ALL=(agent) NOPASSWD: /home/agent/.local/bin/agent' | \
   sudo tee /etc/sudoers.d/voice-assistant-agent
 sudo chmod 440 /etc/sudoers.d/voice-assistant-agent
 ```
@@ -122,10 +125,10 @@ Expected: `...file parsed OK`
 
 ## 6. Verify the Full Invocation Path
 
-Test that `user` can run the agent binary as `agent` from a non-TTY context (matching the Popen execution environment):
+Test that `voice` can run the agent binary as `agent` from a non-TTY context (matching the Popen execution environment):
 
 ```bash
-sudo -u user bash -c 'sudo -u agent -H /home/agent/.local/bin/agent --version < /dev/null'
+sudo -u voice bash -c 'sudo -u agent -H /home/agent/.local/bin/agent --version < /dev/null'
 ```
 
 Expected: prints version string without a password prompt.
@@ -134,12 +137,12 @@ Expected: prints version string without a password prompt.
 
 ## 7. Configure `.env`
 
-Add to `/home/user/.env` (for `load_dotenv` to find):
+Add to `/home/voice/.env` (for `load_dotenv` to find):
 
 ```
 AGENT_USER=agent
 AGENT_BIN=/home/agent/.local/bin/agent
-AGENT_WORKSPACE=/home/agent/personal
+AGENT_WORKSPACE=/home/agent/raspberry-ai
 ```
 
 ---
@@ -159,4 +162,4 @@ agent  <pid>   <master-pid>  sudo
 agent  <pid2>  <pid>         agent
 ```
 
-If you see `user` instead of `agent` in the first column, the `AGENT_USER` env var is not being picked up — check the `.env` file path and `load_dotenv` call.
+If you see `voice` instead of `agent` in the first column, the `AGENT_USER` env var is not being picked up — check the `.env` file path and `load_dotenv` call.

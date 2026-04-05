@@ -1,0 +1,25 @@
+# forked_assistant — IDE support dependencies
+#
+# Purpose: install on a dev machine so the IDE resolves imports from the
+# voice agent source. NOT the Pi provisioning recipe — see
+# profiling-pi/venv.md for that.
+#
+# Pins reflect /home/voice/venv/ on morpheus (Pi 4) as of 2026-04-05.
+# Regenerate from the live venv:
+#   pip list --format=freeze | grep -E '^(loguru|python-dotenv|...)'
+#
+# Platform notes
+# --------------
+# pyalsaaudio — Linux-only (C extension, requires libasound2-dev). Omitted.
+# piper-tts   — archived backend, not required for production. Omitted.
+# torch       — CPU wheel from download.pytorch.org, not PyPI. Install separately:
+#               pip install torch==2.11.0 torchaudio==2.11.0 --index-url https://download.pytorch.org/whl/cpu
+
+loguru==0.7.3
+python-dotenv==1.2.2
+deepgram-sdk==6.1.1
+cartesia==3.0.2
+elevenlabs==2.41.0
+numpy==2.4.4
+openwakeword==0.4.0
+pipecat-ai==0.0.108

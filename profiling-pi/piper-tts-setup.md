@@ -2,7 +2,7 @@
 
 Installs the Piper TTS engine and voice model used by `forked_assistant/src/master.py`
 (step 8) to synthesise agent responses for playback through the bcm2835 headphone
-output. Applies to the `~/pipecat-agent/venv/` virtual environment on morpheus.
+output. Applies to the `/home/voice/venv/` virtual environment on morpheus.
 
 ---
 
@@ -10,9 +10,9 @@ output. Applies to the `~/pipecat-agent/venv/` virtual environment on morpheus.
 
 A satisfactorily provisioned system exhibits **all** of the following:
 
-- `piper-tts` is installed in `~/pipecat-agent/venv/`
-- `~/piper-models/en_US-lessac-medium.onnx` and its `.json` sidecar are present
-- `PIPER_MODEL_PATH` is set in `~/.env` pointing to the `.onnx` file
+- `piper-tts` is installed in `/home/voice/venv/`
+- `/home/voice/piper-models/en_US-lessac-medium.onnx` and its `.json` sidecar are present
+- `PIPER_MODEL_PATH` is set in `/home/voice/.env` pointing to the `.onnx` file
 - A smoke test synthesises a sentence and plays it through device 0 without error
 
 ---
@@ -22,7 +22,7 @@ A satisfactorily provisioned system exhibits **all** of the following:
 ### 1. Activate the venv
 
 ```bash
-source ~/pipecat-agent/venv/bin/activate
+source /home/voice/venv/bin/activate
 ```
 
 ### 2. Install `piper-tts`
@@ -38,8 +38,8 @@ mature package (well past the cooldown window) so no bypass is needed.
 ### 3. Download the voice model
 
 ```bash
-mkdir -p ~/piper-models
-cd ~/piper-models
+mkdir -p /home/voice/piper-models
+cd /home/voice/piper-models
 
 # ONNX model
 curl -L -o en_US-lessac-medium.onnx \
@@ -57,7 +57,7 @@ the paths above. The `.onnx` and `.onnx.json` must be the same release version.
 ### 4. Add `PIPER_MODEL_PATH` to `.env`
 
 ```bash
-echo 'PIPER_MODEL_PATH=/home/user/piper-models/en_US-lessac-medium.onnx' >> ~/.env
+echo 'PIPER_MODEL_PATH=/home/voice/piper-models/en_US-lessac-medium.onnx' >> /home/voice/.env
 ```
 
 ---
@@ -65,7 +65,7 @@ echo 'PIPER_MODEL_PATH=/home/user/piper-models/en_US-lessac-medium.onnx' >> ~/.e
 ## Verify
 
 ```bash
-source ~/pipecat-agent/venv/bin/activate
+source /home/voice/venv/bin/activate
 
 # 1. Package installed
 python -c "import piper; print('piper-tts ok')"
@@ -74,7 +74,7 @@ python -c "import piper; print('piper-tts ok')"
 # 2. Model loads and reports correct sample rate
 python -c "
 from piper.voice import PiperVoice
-v = PiperVoice.load('/home/user/piper-models/en_US-lessac-medium.onnx')
+v = PiperVoice.load('/home/voice/piper-models/en_US-lessac-medium.onnx')
 print('sample_rate:', v.config.sample_rate)
 "
 # Expected: sample_rate: 22050
@@ -119,4 +119,4 @@ which is not present on current releases.
   during TTS playback by the `SET_IDLE` / `SET_WAKE_LISTEN` protocol, so the
   only concurrent ONNX load is cross-process on separate pinned cores — watch
   duty-cycle reports on first Pi validation run.
-- Model file size: `.onnx` ≈ 63 MB. Ensure adequate free space in `/home/user`.
+- Model file size: `.onnx` ≈ 63 MB. Ensure adequate free space in `/home/voice`.
