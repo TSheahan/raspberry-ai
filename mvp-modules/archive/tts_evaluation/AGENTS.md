@@ -41,13 +41,18 @@ class TTSBackend(ABC):
 
 `play()` must:
 - Accept `Iterator[str]` of sentence-boundary-aligned chunks (from `agent_session.run()`)
-- Play audio through PyAudio device 0 (bcm2835, S16_LE, ALSA only)
+- Play audio through ALSA device 0 (bcm2835, S16_LE) via `pyalsaaudio`
 - Block until all audio for the turn has been played
 - Handle each chunk incrementally — do not buffer the full response before starting
 
+Audio output uses `pyalsaaudio` (direct `snd_pcm_writei()`, no PortAudio). PyAudio
+was the confirmed cause of audio tearing on bcm2835 — PortAudio's callback thread
+gets descheduled on Pi 4 ARM, causing intermittent underruns. See session 2 findings
+in `session_2_wrap.md` and the `_AudioOut` abstraction in `tts.py`.
+
 For cloud REST backends (no native streaming), the implementation pattern is:
-- Per-chunk: call API with the chunk text, receive audio bytes, write to PyAudio stream
-- One PyAudio stream per turn; open before loop, close after
+- Per-chunk: call API with the chunk text, receive audio bytes, write to `_AudioOut`
+- One `_AudioOut` instance per turn; open before loop, close after
 
 ## Candidates
 
@@ -89,18 +94,20 @@ For cloud REST backends (no native streaming), the implementation pattern is:
 ### Phase 1 — Deepgram Aura (Pi run)
 
 `DeepgramTTS` is already written in `mvp-modules/forked_assistant/src/tts.py`.
-Read it before running — note the open questions in `effort_log.md` (sample rate
-to verify, SDK return type to confirm on first run).
+Session 1 ran Deepgram on Pi with PyAudio — latency was MARGINAL (avg 2613ms)
+and audio tearing was present. Session 2 identified PortAudio as the tearing
+root cause and replaced it with `pyalsaaudio`. **Phase 1 needs to be re-run
+with `pyalsaaudio` audio output to get a clean quality assessment.**
 
-1. Standalone test: synthesise one sentence (`"Hello, how can I help you?"`)
-   - Confirm audio through 3.5mm jack
-   - Measure: wall time from API call start to first audio sample out
-   - Verify `_DEFAULT_SAMPLE_RATE = 24000` is correct; adjust if pitch is wrong
-2. Multi-chunk test: feed a 3-sentence iterator, measure per-chunk latency
-3. Memory check: `ps aux` RSS during synthesis — must stay well under 700 MB total
+1. Install `pyalsaaudio` on Pi (see `profiling-pi/venv.md`)
+2. Re-run: `python mvp-modules/archive/tts_evaluation/compare_tts.py --deepgram-only`
+   - Audio output now uses `pyalsaaudio` (direct ALSA) — no tearing expected
+   - Confirm clean audio through 3.5mm jack
+   - Measure per-sentence latency
+3. Memory check: RSS must stay well under 700 MB total (session 1: 66 MB — passed)
 
 If per-chunk latency ≤ 800ms and quality is acceptable → proceed to Phase 3.
-If latency > 800ms → proceed to Phase 2a.
+If latency > 800ms → proceed to Phase 2a (ElevenLabs).
 
 ### Phase 2a — ElevenLabs (Pi run, only if Phase 1 marginal)
 
@@ -158,7 +165,10 @@ If latency still marginal → proceed to Phase 2b.
 tts_evaluation/
 ├── AGENTS.md                ← you are here
 ├── compare_tts.py           ← standalone comparison harness (Phase 1/2 runs)
+├── replay_wav.py            ← WAV replay tool: PyAudio sweep, pyalsaaudio, aplay modes
 ├── effort_log.md            ← running session log: findings, measurements, decisions
+├── session_1_wrap.md        ← session 1 summary: setup, Phase 1 results, tearing found
+├── session_2_wrap.md        ← session 2 summary: tearing root cause confirmed, pyalsaaudio fix
 ├── deepgram_tts_notes.md    ← Deepgram Aura API reference, voice controls, SDK patterns
 ├── elevenlabs_notes.md      ← ElevenLabs evaluation notes (create when Phase 2a runs)
 └── cartesia_notes.md        ← Cartesia evaluation notes (create if Phase 2b runs)
@@ -180,7 +190,8 @@ Paths are relative to the repo root (`raspberry-ai/`). This folder lives at
 ## Hardware Context
 
 - **Device:** Raspberry Pi 4 Model B, 1 GB RAM, quad-core ARM Cortex-A72
-- **Audio output:** bcm2835 headphones (3.5mm jack), PyAudio device 0, ALSA only, S16_LE
+- **Audio output:** bcm2835 headphones (3.5mm jack), ALSA `hw:0,0`, S16_LE
+  - Uses `pyalsaaudio` (direct `snd_pcm_writei()`); PyAudio/PortAudio rejected (tearing)
 - **Python venv:** `~/pipecat-agent/venv/` — `deepgram-sdk` already installed
 - **Process:** TTS runs in master process (cores 1–3); recorder child on core 0 in idle phase
 - **No process breakout needed:** cloud TTS is HTTP API calls — no ONNX, no memory pressure

@@ -10,8 +10,15 @@
 #
 # Platform notes
 # --------------
+# pyalsaaudio
+#   Direct ALSA bindings (snd_pcm_writei). Used for TTS audio output on Pi.
+#   Replaces PyAudio — PortAudio's callback thread causes tearing on bcm2835.
+#   Linux-only; Windows fallback uses PyAudio. Build requires libasound2-dev.
+#   See profiling-pi/venv.md for install/verify steps.
+#
 # PyAudio (0.2.14)
-#   C extension wrapping PortAudio. On Pi: ALSA-backed, install as-is.
+#   C extension wrapping PortAudio. Retained for Windows dev fallback only.
+#   On Pi: superseded by pyalsaaudio for audio output (tearing fix, 2026-04-05).
 #   On Windows: pre-built wheel available on PyPI for Python 3.13 — installs
 #   cleanly with no PortAudio SDK required (verified 2026-04-02).
 #
@@ -42,3 +49,7 @@ python-dotenv
 
 # --- EU-7 (step 8 TTS): no pin until verified on Pi venv ---
 piper-tts
+
+# --- Audio output (tearing fix, 2026-04-05) ---
+# pyalsaaudio  (Linux-only; not installable on Windows — omitted from pip install)
+# Install on Pi: pip install pyalsaaudio (requires libasound2-dev)

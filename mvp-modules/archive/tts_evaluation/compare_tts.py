@@ -17,14 +17,17 @@ Backends enabled by environment (loaded from .env via find_dotenv search):
 Each backend runs only if its API key is set and its package is installed.
 Use --only flags to force a single backend regardless.
 
+Audio output (Linux): pyalsaaudio (direct ALSA, no PortAudio). PyAudio tearing on
+bcm2835 was confirmed in session 2 — PortAudio's callback thread causes intermittent
+underruns on Pi 4 ARM. pyalsaaudio calls snd_pcm_writei() directly and plays clean.
+Fallback: PyAudio on non-Linux (Windows dev).
+
 Options:
     --deepgram-only         Run Deepgram only
     --elevenlabs-only       Run ElevenLabs only
     --cartesia-only         Run Cartesia only
     --sentence TEXT         Add a test sentence (repeatable; replaces defaults)
     --pause SECS            Pause between backends/sentences, default 2.0
-    --frames-per-buffer N   PyAudio frames_per_buffer (default: PortAudio chooses).
-                            Use replay_wav.py to sweep values; apply the clean one here.
     --dg-model NAME         Deepgram voice ID, default: aura-2-thalia-en
     --dg-speed FLOAT        Deepgram speed 0.7–1.5, default: 0.9
     --el-voice-id ID        ElevenLabs voice ID, default: Rachel (21m00Tcm4TlvDq8ikWAM)
@@ -36,11 +39,11 @@ Options:
 Measurements per sentence per backend:
     latency_ms   Time from API call start to first audio byte received
                  (Deepgram: full REST round-trip; ElevenLabs/Cartesia: first stream chunk)
-    total_ms     API call start to last audio byte played through PyAudio
+    total_ms     API call start to last audio byte played through ALSA
     audio_kb     Raw PCM bytes received (sanity check / billing reference)
     rss_mb       Process RSS during synthesis (from /proc/self/status)
 
-Audio device: PyAudio output_device_index=0 (bcm2835 headphones, ALSA device 0).
+Audio device: ALSA hw:0,0 (bcm2835 headphones) on Linux; PyAudio default on Windows.
 """
 
 import argparse
@@ -50,7 +53,6 @@ import time
 import wave
 from pathlib import Path
 
-import pyaudio
 from dotenv import load_dotenv
 from loguru import logger
 
@@ -77,8 +79,9 @@ DEFAULT_SENTENCES = [
 DEEPGRAM_SAMPLE_RATE = 24000      # Aura-2 linear16 output rate; verify on first run
 ELEVENLABS_SAMPLE_RATE = 24000    # pcm_24000 format; matches Deepgram — no stream reopen needed
 CARTESIA_SAMPLE_RATE = 22050      # Cartesia PCM output rate; adjust if pitch is wrong
-PYAUDIO_DEVICE_INDEX = 0 if sys.platform != "win32" else None
-# Pi: device 0 = bcm2835 headphones (ALSA). Windows: None = PortAudio default output.
+
+_ALSA_DEVICE = "hw:0,0"
+_ALSA_PERIOD = 4096
 
 
 # ---------------------------------------------------------------------------
@@ -97,28 +100,60 @@ def _rss_mb() -> float:
     return 0.0
 
 
-_FRAMES_PER_BUFFER: int | None = None  # set from --frames-per-buffer at startup
+# ---------------------------------------------------------------------------
+# Audio output abstraction — pyalsaaudio on Linux, PyAudio fallback on Windows
+# ---------------------------------------------------------------------------
 
+class _AudioOut:
+    """Thin wrapper: write(pcm_bytes), close(). Uses pyalsaaudio on Linux."""
 
-def _open_stream(pa: pyaudio.PyAudio, sample_rate: int) -> pyaudio.Stream:
-    kwargs: dict = dict(
-        format=pyaudio.paInt16,
-        channels=1,
-        rate=sample_rate,
-        output=True,
-        output_device_index=PYAUDIO_DEVICE_INDEX,
-    )
-    if _FRAMES_PER_BUFFER is not None:
-        kwargs["frames_per_buffer"] = _FRAMES_PER_BUFFER
-    stream = pa.open(**kwargs)
-    latency_s = stream.get_output_latency()
-    latency_frames = round(latency_s * sample_rate)
-    logger.debug(
-        "[audio] negotiated output latency: {:.1f}ms ({} frames at {}Hz)  frames_per_buffer={}",
-        latency_s * 1000, latency_frames, sample_rate,
-        _FRAMES_PER_BUFFER if _FRAMES_PER_BUFFER is not None else "default",
-    )
-    return stream
+    def __init__(self, sample_rate: int) -> None:
+        self._sample_rate = sample_rate
+        self._use_alsa = sys.platform == "linux"
+        self._device = None
+        self._pa = None
+        self._stream = None
+
+        if self._use_alsa:
+            import alsaaudio
+            self._device = alsaaudio.PCM(
+                type=alsaaudio.PCM_PLAYBACK,
+                device=_ALSA_DEVICE,
+                channels=1,
+                rate=sample_rate,
+                format=alsaaudio.PCM_FORMAT_S16_LE,
+                periodsize=_ALSA_PERIOD,
+            )
+            logger.debug("[audio] alsaaudio opened  dev={}  rate={}  period={}",
+                         _ALSA_DEVICE, sample_rate, _ALSA_PERIOD)
+        else:
+            import pyaudio
+            self._pa = pyaudio.PyAudio()
+            self._stream = self._pa.open(
+                format=pyaudio.paInt16,
+                channels=1,
+                rate=sample_rate,
+                output=True,
+            )
+            logger.debug("[audio] PyAudio opened (Windows fallback)  rate={}", sample_rate)
+
+    def write(self, pcm: bytes) -> None:
+        if self._device is not None:
+            self._device.write(pcm)
+        elif self._stream is not None:
+            self._stream.write(pcm)
+
+    def close(self) -> None:
+        if self._device is not None:
+            self._device.close()
+            self._device = None
+        if self._stream is not None:
+            self._stream.stop_stream()
+            self._stream.close()
+            self._stream = None
+        if self._pa is not None:
+            self._pa.terminate()
+            self._pa = None
 
 
 def _save_wav(path: Path, pcm_bytes: bytes, sample_rate: int) -> None:
@@ -142,16 +177,9 @@ def _run_deepgram_sentence(
     client,
     model: str,
     speed: float,
-    pa: pyaudio.PyAudio,
     save_path: Path | None = None,
 ) -> dict:
-    """Synthesise `text` via Deepgram REST and play through device 0.
-
-    Deepgram Aura uses a REST endpoint — the full audio response is received
-    before playback starts. `latency_ms` is therefore the complete API round-trip
-    (network RTT + synthesis time + audio transfer). For a ~15-word sentence
-    expect 200–600ms depending on network conditions.
-    """
+    """Synthesise `text` via Deepgram REST and play through ALSA device 0."""
     from deepgram.core.request_options import RequestOptions  # type: ignore[import]
 
     opts = RequestOptions(additional_query_parameters={"speed": str(speed)})
@@ -168,26 +196,18 @@ def _run_deepgram_sentence(
         encoding="linear16",
         request_options=opts,
     )
-    audio = b"".join(response)          # REST: join iterator -> full PCM bytes
+    audio = b"".join(response)
     latency_ms = (time.monotonic() - t0) * 1000
     logger.info("[deepgram] {:>5.0f} ms  {:>6.1f} KB  {!r}", latency_ms, len(audio) / 1024, text[:60])
 
     if save_path:
         _save_wav(save_path, audio, DEEPGRAM_SAMPLE_RATE)
 
-    stream = _open_stream(pa, DEEPGRAM_SAMPLE_RATE)
-    t_play = time.monotonic()
+    out = _AudioOut(DEEPGRAM_SAMPLE_RATE)
     try:
-        stream.write(audio)
-        # write() returns when data is queued, not when hardware finishes.
-        # Sleep for any remaining duration so stop_stream() doesn't cut the tail.
-        audio_duration_s = len(audio) / (DEEPGRAM_SAMPLE_RATE * 2)  # S16LE = 2 bytes/sample
-        remaining_s = audio_duration_s - (time.monotonic() - t_play)
-        if remaining_s > 0.01:
-            time.sleep(remaining_s)
+        out.write(audio)
     finally:
-        stream.stop_stream()
-        stream.close()
+        out.close()
 
     total_ms = (time.monotonic() - t0) * 1000
     rss_peak = max(rss_before, _rss_mb())
@@ -206,7 +226,6 @@ def _run_deepgram(
     sentences: list[str],
     model: str,
     speed: float,
-    pa: pyaudio.PyAudio,
     save_dir: Path | None = None,
     sentence_offset: int = 0,
 ) -> list[dict]:
@@ -223,7 +242,7 @@ def _run_deepgram(
     results = []
     for i, text in enumerate(sentences):
         save_path = save_dir / f"deepgram_{sentence_offset + i:02d}.wav" if save_dir else None
-        row = _run_deepgram_sentence(text, client, model, speed, pa, save_path=save_path)
+        row = _run_deepgram_sentence(text, client, model, speed, save_path=save_path)
         if row:
             results.append(row)
     return results
@@ -239,19 +258,9 @@ def _run_cartesia_sentence(
     model: str,
     voice_id: str,
     sample_rate: int,
-    pa: pyaudio.PyAudio,
     save_path: Path | None = None,
 ) -> dict:
-    """Synthesise `text` via Cartesia WebSocket and play through device 0.
-
-    Cartesia uses WebSocket streaming — audio chunks arrive while synthesis
-    continues. `latency_ms` is the time to the first audio chunk, which should
-    be < 200ms per Cartesia documentation. Chunks are written to PyAudio as they
-    arrive, so playback and synthesis overlap.
-
-    SDK note: tested against cartesia>=1.0. The chunk object has a `.audio`
-    attribute (bytes or None). Verify on first Pi run; SDK internals change.
-    """
+    """Synthesise `text` via Cartesia WebSocket and play through ALSA device 0."""
     text = _strip_markdown(text)
     if not text:
         return {}
@@ -262,7 +271,7 @@ def _run_cartesia_sentence(
     total_bytes = 0
 
     pcm_buffer: list[bytes] = []
-    stream = _open_stream(pa, sample_rate)
+    out = _AudioOut(sample_rate)
     ws = client.tts.websocket_connect()
     try:
         for chunk in ws.send(
@@ -281,14 +290,13 @@ def _run_cartesia_sentence(
                 if first_chunk_ms is None:
                     first_chunk_ms = (time.monotonic() - t0) * 1000
                     logger.info("[cartesia] first chunk in {:.0f} ms", first_chunk_ms)
-                stream.write(audio)
+                out.write(audio)
                 total_bytes += len(audio)
                 if save_path:
                     pcm_buffer.append(audio)
     finally:
         ws.close()
-        stream.stop_stream()
-        stream.close()
+        out.close()
 
     if save_path and pcm_buffer:
         _save_wav(save_path, b"".join(pcm_buffer), sample_rate)
@@ -315,7 +323,6 @@ def _run_cartesia(
     model: str,
     voice_id: str,
     sample_rate: int,
-    pa: pyaudio.PyAudio,
     save_dir: Path | None = None,
     sentence_offset: int = 0,
 ) -> list[dict]:
@@ -339,7 +346,7 @@ def _run_cartesia(
     results = []
     for i, text in enumerate(sentences):
         save_path = save_dir / f"cartesia_{sentence_offset + i:02d}.wav" if save_dir else None
-        row = _run_cartesia_sentence(text, client, model, voice_id, sample_rate, pa, save_path=save_path)
+        row = _run_cartesia_sentence(text, client, model, voice_id, sample_rate, save_path=save_path)
         if row:
             results.append(row)
     return results
@@ -354,18 +361,9 @@ def _run_elevenlabs_sentence(
     client,
     voice_id: str,
     model: str,
-    pa: pyaudio.PyAudio,
     save_path: Path | None = None,
 ) -> dict:
-    """Synthesise `text` via ElevenLabs convert_as_stream() and play through device 0.
-
-    ElevenLabs streams PCM chunks as they are synthesised. `latency_ms` is the
-    time to the first audio chunk. Flash v2.5 targets ~75ms per ElevenLabs docs.
-    Chunks are written to PyAudio as they arrive — playback and synthesis overlap.
-
-    SDK note: elevenlabs>=1.0. convert_as_stream() yields bytes objects.
-    output_format="pcm_24000" returns raw S16LE at 24kHz — no decode needed.
-    """
+    """Synthesise `text` via ElevenLabs streaming and play through ALSA device 0."""
     text = _strip_markdown(text)
     if not text:
         return {}
@@ -376,7 +374,7 @@ def _run_elevenlabs_sentence(
     total_bytes = 0
 
     pcm_buffer: list[bytes] = []
-    stream = _open_stream(pa, ELEVENLABS_SAMPLE_RATE)
+    out = _AudioOut(ELEVENLABS_SAMPLE_RATE)
     try:
         audio_stream = client.text_to_speech.stream(
             voice_id=voice_id,
@@ -389,13 +387,12 @@ def _run_elevenlabs_sentence(
                 if first_chunk_ms is None:
                     first_chunk_ms = (time.monotonic() - t0) * 1000
                     logger.info("[elevenlabs] first chunk in {:.0f} ms", first_chunk_ms)
-                stream.write(pcm_chunk)
+                out.write(pcm_chunk)
                 total_bytes += len(pcm_chunk)
                 if save_path:
                     pcm_buffer.append(pcm_chunk)
     finally:
-        stream.stop_stream()
-        stream.close()
+        out.close()
 
     if save_path and pcm_buffer:
         _save_wav(save_path, b"".join(pcm_buffer), ELEVENLABS_SAMPLE_RATE)
@@ -421,7 +418,6 @@ def _run_elevenlabs(
     sentences: list[str],
     voice_id: str,
     model: str,
-    pa: pyaudio.PyAudio,
     save_dir: Path | None = None,
     sentence_offset: int = 0,
 ) -> list[dict]:
@@ -442,7 +438,7 @@ def _run_elevenlabs(
     results = []
     for i, text in enumerate(sentences):
         save_path = save_dir / f"elevenlabs_{sentence_offset + i:02d}.wav" if save_dir else None
-        row = _run_elevenlabs_sentence(text, client, voice_id, model, pa, save_path=save_path)
+        row = _run_elevenlabs_sentence(text, client, voice_id, model, save_path=save_path)
         if row:
             results.append(row)
     return results
@@ -527,10 +523,6 @@ def _parse_args() -> argparse.Namespace:
                         "(default dir: current directory)")
     p.add_argument("--pause", type=float, default=2.0, metavar="SECS",
                    help="Pause between backends within a sentence (default: 2.0)")
-    p.add_argument("--frames-per-buffer", type=int, default=None, metavar="N",
-                   help="PyAudio frames_per_buffer passed to pa.open() for all backends. "
-                        "Leave unset to let PortAudio choose (default). "
-                        "Use replay_wav.py to find the first clean value, then pass it here.")
     p.add_argument("--dg-model", default="aura-2-thalia-en", metavar="NAME",
                    help="Deepgram voice ID (default: aura-2-thalia-en)")
     p.add_argument("--dg-speed", type=float, default=0.9, metavar="FLOAT",
@@ -549,9 +541,7 @@ def _parse_args() -> argparse.Namespace:
 
 
 def main() -> None:
-    global _FRAMES_PER_BUFFER
     args = _parse_args()
-    _FRAMES_PER_BUFFER = args.frames_per_buffer
     sentences = args.sentences or DEFAULT_SENTENCES
 
     run_deepgram = args.deepgram_only or not (args.elevenlabs_only or args.cartesia_only)
@@ -566,47 +556,42 @@ def main() -> None:
         len(sentences), run_deepgram, run_elevenlabs, run_cartesia,
     )
 
-    pa = pyaudio.PyAudio()
     all_results: list[dict] = []
 
-    try:
-        for i, text in enumerate(sentences):
-            logger.info("-- sentence {} of {} ------------------------------------------", i + 1, len(sentences))
-            logger.info("  {!r}", text)
-            active_backends: list[str] = []
+    for i, text in enumerate(sentences):
+        logger.info("-- sentence {} of {} ------------------------------------------", i + 1, len(sentences))
+        logger.info("  {!r}", text)
+        active_backends: list[str] = []
 
-            if run_deepgram:
-                rows = _run_deepgram([text], model=args.dg_model, speed=args.dg_speed, pa=pa, save_dir=save_dir, sentence_offset=i)
-                all_results.extend(rows)
-                if rows:
-                    active_backends.append("deepgram")
+        if run_deepgram:
+            rows = _run_deepgram([text], model=args.dg_model, speed=args.dg_speed, save_dir=save_dir, sentence_offset=i)
+            all_results.extend(rows)
+            if rows:
+                active_backends.append("deepgram")
 
-            if run_elevenlabs:
-                if active_backends:
-                    time.sleep(args.pause)
-                rows = _run_elevenlabs([text], voice_id=args.el_voice_id, model=args.el_model, pa=pa, save_dir=save_dir, sentence_offset=i)
-                all_results.extend(rows)
-                if rows:
-                    active_backends.append("elevenlabs")
-
-            if run_cartesia:
-                if active_backends:
-                    time.sleep(args.pause)
-                rows = _run_cartesia(
-                    [text],
-                    model=args.cartesia_model,
-                    voice_id=args.cartesia_voice_id,
-                    sample_rate=args.cartesia_rate,
-                    pa=pa,
-                    save_dir=save_dir,
-                    sentence_offset=i,
-                )
-                all_results.extend(rows)
-
-            if i < len(sentences) - 1:
+        if run_elevenlabs:
+            if active_backends:
                 time.sleep(args.pause)
-    finally:
-        pa.terminate()
+            rows = _run_elevenlabs([text], voice_id=args.el_voice_id, model=args.el_model, save_dir=save_dir, sentence_offset=i)
+            all_results.extend(rows)
+            if rows:
+                active_backends.append("elevenlabs")
+
+        if run_cartesia:
+            if active_backends:
+                time.sleep(args.pause)
+            rows = _run_cartesia(
+                [text],
+                model=args.cartesia_model,
+                voice_id=args.cartesia_voice_id,
+                sample_rate=args.cartesia_rate,
+                save_dir=save_dir,
+                sentence_offset=i,
+            )
+            all_results.extend(rows)
+
+        if i < len(sentences) - 1:
+            time.sleep(args.pause)
 
     _print_table(all_results)
     _print_effort_log_row(all_results)

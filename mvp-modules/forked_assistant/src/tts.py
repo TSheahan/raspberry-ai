@@ -10,49 +10,91 @@ TTSBackend (abstract)
 Implementations
     PiperTTS        — local Piper ONNX (reference; unsuitable for 1 GB Pi 4 — see note)
     DeepgramTTS     — Deepgram Aura REST API (Phase 1 evaluation candidate)
-    CartesiaTTS     — Cartesia WebSocket streaming (Phase 2 candidate; install: pip install cartesia)
+    ElevenLabsTTS   — ElevenLabs streaming (Phase 2a candidate)
+    CartesiaTTS     — Cartesia WebSocket streaming (Phase 2b candidate)
+
+Audio output: pyalsaaudio (direct ALSA snd_pcm_writei) on Linux; PyAudio fallback
+on Windows for dev. PortAudio (PyAudio) causes tearing on bcm2835 due to its
+internal callback thread getting descheduled on Pi 4 ARM — confirmed in
+tts_evaluation session 2 (2026-04-05). See _AudioOut class.
 
 Usage (from master.py):
     tts = DeepgramTTS()               # or whichever backend is active
     tts.play(agent.run(transcript))   # blocks until all audio is played
     tts.close()                       # call once at process exit
-
-PiperTTS note:
-    PiperTTS is retained as reference code. It is not suitable for production on the
-    1 GB Pi 4: the en_US-lessac-medium ONNX model (~63 MB) exhausted total swap during
-    synthesis (317 MB RSS + 385 MB swap ≈ 700 MB against 900 MB total), triggering an
-    OOM kill. Audio tearing was also observed. See archive/tts_evaluation/ for the
-    rearchitecture effort and the DeepgramTTS evaluation notes.
-
-DeepgramTTS note:
-    Uses deepgram-sdk v6 (already in Pi venv). Requires DEEPGRAM_API_KEY in .env.
-    linear16 encoding (raw S16_LE PCM) avoids any decode step on Pi.
-    Per-chunk synthesis: one API call per sentence boundary chunk from agent.run().
-    Evaluation: archive/tts_evaluation/effort_log.md.
-
-CartesiaTTS note:
-    Uses cartesia SDK (pip install cartesia — not yet in Pi venv as of 2026-04-05).
-    Requires CARTESIA_API_KEY in .env (new account needed).
-    WebSocket streaming: first audio chunk < 200ms per Cartesia documentation.
-    Per-chunk: one WebSocket send per sentence chunk; audio bytes written incrementally.
-    Evaluation: archive/tts_evaluation/effort_log.md Phase 2.
-
-ElevenLabsTTS note:
-    Uses elevenlabs SDK (pip install elevenlabs — not yet in Pi venv as of 2026-04-05).
-    Requires ELEVENLABS_API_KEY in .env (account at elevenlabs.io; API key under Profile → API Keys).
-    Streaming via convert_as_stream(); pcm_24000 encoding (raw S16LE, 24kHz — matches Deepgram rate).
-    Flash v2.5 model targets ~75ms first-chunk latency per ElevenLabs documentation.
-    Evaluation: archive/tts_evaluation/effort_log.md Phase 2.
 """
 
 import os
 import re
+import sys
 from abc import ABC, abstractmethod
 from collections.abc import Iterator
 from pathlib import Path
 
-import pyaudio
 from loguru import logger
+
+# ---------------------------------------------------------------------------
+# Audio output — pyalsaaudio on Linux (direct ALSA), PyAudio fallback (Windows dev)
+#
+# PortAudio (PyAudio) causes audio tearing on bcm2835 (Pi 4 headphone jack).
+# Root cause: PortAudio's internal callback thread gets descheduled on ARM,
+# causing intermittent hardware buffer underruns. pyalsaaudio calls
+# snd_pcm_writei() directly from the calling thread and plays clean.
+# Confirmed in tts_evaluation session 2 (2026-04-05).
+# ---------------------------------------------------------------------------
+
+_ALSA_DEVICE = "hw:0,0"
+_ALSA_PERIOD = 4096
+
+
+class _AudioOut:
+    """Thin wrapper: write(pcm_bytes), close(). Uses pyalsaaudio on Linux."""
+
+    def __init__(self, sample_rate: int) -> None:
+        self._use_alsa = sys.platform == "linux"
+        self._device = None
+        self._pa = None
+        self._stream = None
+
+        if self._use_alsa:
+            import alsaaudio
+            self._device = alsaaudio.PCM(
+                type=alsaaudio.PCM_PLAYBACK,
+                device=_ALSA_DEVICE,
+                channels=1,
+                rate=sample_rate,
+                format=alsaaudio.PCM_FORMAT_S16_LE,
+                periodsize=_ALSA_PERIOD,
+            )
+            logger.debug("[audio] alsaaudio opened  dev={}  rate={}  period={}",
+                         _ALSA_DEVICE, sample_rate, _ALSA_PERIOD)
+        else:
+            import pyaudio
+            self._pa = pyaudio.PyAudio()
+            self._stream = self._pa.open(
+                format=pyaudio.paInt16,
+                channels=1,
+                rate=sample_rate,
+                output=True,
+            )
+
+    def write(self, pcm: bytes) -> None:
+        if self._device is not None:
+            self._device.write(pcm)
+        elif self._stream is not None:
+            self._stream.write(pcm)
+
+    def close(self) -> None:
+        if self._device is not None:
+            self._device.close()
+            self._device = None
+        if self._stream is not None:
+            self._stream.stop_stream()
+            self._stream.close()
+            self._stream = None
+        if self._pa is not None:
+            self._pa.terminate()
+            self._pa = None
 
 
 # ---------------------------------------------------------------------------
@@ -67,9 +109,12 @@ class TTSBackend(ABC):
         tts.close()
 
     Any implementation that accepts an Iterator[str] of sentence-boundary-aligned
-    chunks and plays audio through PyAudio device 0 (bcm2835, S16_LE, ALSA only)
-    satisfies the contract. Device index, sample rate, and encoding are backend
-    responsibilities — master.py does not know or care.
+    chunks and plays audio through ALSA device 0 (bcm2835, S16_LE) satisfies the
+    contract. Device, sample rate, and encoding are backend responsibilities —
+    master.py does not know or care.
+
+    Audio output uses pyalsaaudio (direct ALSA) on Linux; PyAudio fallback on
+    Windows for dev. See _AudioOut above.
     """
 
     @abstractmethod
@@ -126,26 +171,18 @@ class DeepgramTTS(TTSBackend):
         self._model = model
         self._sample_rate = sample_rate
         self._speed = speed
-        self._pa = pyaudio.PyAudio()
         logger.info(
             "[tts] DeepgramTTS ready  model={}  sample_rate={}  speed={}",
             model, sample_rate, speed,
         )
 
     def play(self, text_chunks: Iterator[str]) -> None:
-        """Synthesise each sentence chunk via Deepgram and play through device 0.
+        """Synthesise each sentence chunk via Deepgram and play through ALSA device 0.
 
-        Opens one PyAudio stream for the turn. Each chunk results in one API
-        call; audio bytes are written to the stream as received. Stream closes
-        after the last chunk.
+        Opens one audio output per turn. Each chunk results in one API call;
+        audio bytes are written to the output as received.
         """
-        stream = self._pa.open(
-            format=pyaudio.paInt16,
-            channels=1,
-            rate=self._sample_rate,
-            output=True,
-            output_device_index=0,
-        )
+        out = _AudioOut(self._sample_rate)
         try:
             for chunk in text_chunks:
                 chunk = _strip_markdown(chunk)
@@ -154,16 +191,14 @@ class DeepgramTTS(TTSBackend):
                 logger.debug("[tts] synthesising ({} chars): {!r}", len(chunk), chunk[:80])
                 audio_bytes = self._synthesise(chunk)
                 if audio_bytes:
-                    stream.write(audio_bytes)
+                    out.write(audio_bytes)
                     logger.debug("[tts] wrote {} bytes", len(audio_bytes))
         finally:
-            stream.stop_stream()
-            stream.close()
+            out.close()
 
     def close(self) -> None:
-        """Terminate the PyAudio instance. Call once at process exit."""
-        self._pa.terminate()
-        logger.debug("[tts] PyAudio terminated")
+        """No persistent audio resources to release (output opened per-turn)."""
+        logger.debug("[tts] DeepgramTTS closed")
 
     def _synthesise(self, text: str) -> bytes:
         """Call Deepgram Aura REST API and return raw linear16 PCM bytes."""
@@ -225,44 +260,30 @@ class CartesiaTTS(TTSBackend):
         self._model = model
         self._voice_id = voice_id
         self._sample_rate = sample_rate
-        self._pa = pyaudio.PyAudio()
         logger.info(
             "[tts] CartesiaTTS ready  model={}  voice={}  sample_rate={}",
             model, voice_id, sample_rate,
         )
 
     def play(self, text_chunks: Iterator[str]) -> None:
-        """Synthesise each sentence chunk via Cartesia WebSocket and play through device 0.
-
-        Opens one PyAudio stream per turn. Opens one WebSocket per chunk (Cartesia
-        SDK manages the underlying connection). Audio bytes are written to PyAudio
-        as they arrive from the stream — playback and synthesis overlap.
-        """
-        stream = self._pa.open(
-            format=pyaudio.paInt16,
-            channels=1,
-            rate=self._sample_rate,
-            output=True,
-            output_device_index=0,
-        )
+        """Synthesise each sentence chunk via Cartesia WebSocket and play through ALSA device 0."""
+        out = _AudioOut(self._sample_rate)
         try:
             for chunk in text_chunks:
                 chunk = _strip_markdown(chunk)
                 if not chunk:
                     continue
                 logger.debug("[tts] synthesising ({} chars): {!r}", len(chunk), chunk[:80])
-                self._synthesise_to_stream(chunk, stream)
+                self._synthesise_to_output(chunk, out)
         finally:
-            stream.stop_stream()
-            stream.close()
+            out.close()
 
     def close(self) -> None:
-        """Terminate the PyAudio instance. Call once at process exit."""
-        self._pa.terminate()
-        logger.debug("[tts] PyAudio terminated")
+        """No persistent audio resources to release (output opened per-turn)."""
+        logger.debug("[tts] CartesiaTTS closed")
 
-    def _synthesise_to_stream(self, text: str, stream: pyaudio.Stream) -> None:
-        """Open a Cartesia WebSocket send and write audio chunks to `stream` as they arrive."""
+    def _synthesise_to_output(self, text: str, out: _AudioOut) -> None:
+        """Open a Cartesia WebSocket send and write audio chunks as they arrive."""
         try:
             ws = self._client.tts.websocket_connect()
             bytes_written = 0
@@ -279,7 +300,7 @@ class CartesiaTTS(TTSBackend):
             ):
                 audio = getattr(audio_chunk, "audio", None)
                 if audio:
-                    stream.write(audio)
+                    out.write(audio)
                     bytes_written += len(audio)
             ws.close()
             logger.debug("[tts] cartesia wrote {} bytes", bytes_written)
@@ -327,43 +348,30 @@ class ElevenLabsTTS(TTSBackend):
         self._voice_id = voice_id
         self._model = model
         self._sample_rate = sample_rate
-        self._pa = pyaudio.PyAudio()
         logger.info(
             "[tts] ElevenLabsTTS ready  model={}  voice={}  sample_rate={}",
             model, voice_id, sample_rate,
         )
 
     def play(self, text_chunks: Iterator[str]) -> None:
-        """Synthesise each sentence chunk via ElevenLabs and play through device 0.
-
-        Opens one PyAudio stream per turn. Each chunk is one convert_as_stream()
-        call; PCM bytes are written to PyAudio as they arrive.
-        """
-        stream = self._pa.open(
-            format=pyaudio.paInt16,
-            channels=1,
-            rate=self._sample_rate,
-            output=True,
-            output_device_index=0,
-        )
+        """Synthesise each sentence chunk via ElevenLabs and play through ALSA device 0."""
+        out = _AudioOut(self._sample_rate)
         try:
             for chunk in text_chunks:
                 chunk = _strip_markdown(chunk)
                 if not chunk:
                     continue
                 logger.debug("[tts] synthesising ({} chars): {!r}", len(chunk), chunk[:80])
-                self._synthesise_to_stream(chunk, stream)
+                self._synthesise_to_output(chunk, out)
         finally:
-            stream.stop_stream()
-            stream.close()
+            out.close()
 
     def close(self) -> None:
-        """Terminate the PyAudio instance. Call once at process exit."""
-        self._pa.terminate()
-        logger.debug("[tts] PyAudio terminated")
+        """No persistent audio resources to release (output opened per-turn)."""
+        logger.debug("[tts] ElevenLabsTTS closed")
 
-    def _synthesise_to_stream(self, text: str, stream: pyaudio.Stream) -> None:
-        """Stream PCM bytes from ElevenLabs and write to `stream` as they arrive."""
+    def _synthesise_to_output(self, text: str, out: _AudioOut) -> None:
+        """Stream PCM bytes from ElevenLabs and write as they arrive."""
         try:
             audio_stream = self._client.text_to_speech.stream(
                 voice_id=self._voice_id,
@@ -374,7 +382,7 @@ class ElevenLabsTTS(TTSBackend):
             bytes_written = 0
             for pcm_chunk in audio_stream:
                 if pcm_chunk:
-                    stream.write(pcm_chunk)
+                    out.write(pcm_chunk)
                     bytes_written += len(pcm_chunk)
             logger.debug("[tts] elevenlabs wrote {} bytes", bytes_written)
         except Exception:
@@ -404,30 +412,18 @@ class PiperTTS(TTSBackend):
         logger.info("[tts] loading Piper model: {}", model_path)
         self._voice = PiperVoice.load(model_path)
         self._sample_rate: int = self._voice.config.sample_rate
-        self._pa = pyaudio.PyAudio()
         logger.info("[tts] Piper ready  sample_rate={}  model={}",
                     self._sample_rate, model_path.name)
 
     def play(self, text_chunks: Iterator[str]) -> None:
-        """Synthesise and play each text chunk through ALSA device 0.
-
-        Synthesis is disabled via stub — drain the iterator and log text only.
-        Remove the stub block below to re-enable Piper synthesis.
-        """
-        # STUB: Piper synthesis disabled after OOM on Pi 4. Drain and log only.
+        """Synthesis disabled — drain the iterator and log text only."""
         for chunk in text_chunks:
             chunk = _strip_markdown(chunk)
             if chunk:
                 logger.info("[tts:piper-stub] {}", chunk)
         return
 
-        stream = self._pa.open(  # noqa: unreachable
-            format=pyaudio.paInt16,
-            channels=1,
-            rate=self._sample_rate,
-            output=True,
-            output_device_index=0,
-        )
+        out = _AudioOut(self._sample_rate)  # noqa: unreachable
         try:
             for chunk in text_chunks:
                 chunk = _strip_markdown(chunk)
@@ -439,20 +435,18 @@ class PiperTTS(TTSBackend):
                 bytes_written = 0
                 for audio_chunk in self._voice.synthesize(chunk):
                     pcm = audio_chunk.audio_int16_bytes
-                    stream.write(pcm)
+                    out.write(pcm)
                     bytes_written += len(pcm)
                 logger.debug("[tts] played {:.0f}ms of audio ({} bytes) in {:.0f}ms",
                              bytes_written / (self._sample_rate * 2) * 1000,
                              bytes_written,
                              (_monotonic() - t0) * 1000)
         finally:
-            stream.stop_stream()
-            stream.close()
+            out.close()
 
     def close(self) -> None:
-        """Terminate the PyAudio instance. Call once at process exit."""
-        self._pa.terminate()
-        logger.debug("[tts] PyAudio terminated")
+        """No persistent audio resources to release."""
+        logger.debug("[tts] PiperTTS closed")
 
 
 # ---------------------------------------------------------------------------
