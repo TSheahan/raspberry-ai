@@ -214,7 +214,7 @@ _DEFAULT_RESUME_WINDOW = float(os.environ.get("AGENT_RESUME_WINDOW_SECS", "300")
 
 # When set, the agent subprocess is launched as this Linux user via
 # `sudo -u <AGENT_USER> -H --`. Requires a sudoers entry:
-#   user ALL=(agent) NOPASSWD: /home/agent/.local/bin/agent
+#   voice ALL=(agent) NOPASSWD: /home/agent/.local/bin/agent
 # Leave unset (default) to run the agent as the current process user.
 _AGENT_USER = os.environ.get("AGENT_USER", "")
 
