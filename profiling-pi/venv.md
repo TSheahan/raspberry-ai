@@ -24,6 +24,15 @@ available after full install on 1 GB Pi.
 
 ---
 
+## Target State
+
+- `/home/voice/venv/` contains the direct dependencies profiled in this file
+- `pip check` reports no broken requirements
+- `pip-audit` reports no known vulnerabilities (expected skips: flatbuffers, torch, torchaudio — non-standard version labels)
+- pip 26.0.1 or later
+
+---
+
 ## loguru
 
 Structured logging. Used at module scope by every source file in the voice agent.

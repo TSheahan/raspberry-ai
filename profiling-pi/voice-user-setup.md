@@ -60,7 +60,7 @@ After provisioning, `/home/voice` looks like:
 │   ├── bin/
 │   ├── lib/
 │   └── ...
-└── piper-models/           # Piper ONNX models (optional, archived backend)
+└── piper-models/           # Piper ONNX models (optional — see piper-tts-setup.md)
     ├── en_US-lessac-medium.onnx
     └── en_US-lessac-medium.onnx.json
 ```
@@ -130,6 +130,12 @@ EOF
 chmod 600 /home/voice/.env
 ```
 
+If Piper TTS is installed (see `piper-tts-setup.md`), also add:
+
+```
+PIPER_MODEL_PATH=/home/voice/piper-models/en_US-lessac-medium.onnx
+```
+
 ---
 
 ## 6. Verify
@@ -174,9 +180,9 @@ python mvp-modules/forked_assistant/src/tts.py -b elevenlabs "Testing as voice u
 - **Single venv at `/home/voice/venv/`.** Previous deployments scattered venvs
   across `~/pipecat-agent/venv/`, `~/deepgram-benchmark-venv/`, etc. A fresh
   `voice` user starts clean.
-- **Piper models** are optional. The Piper backend is archived (too
-  resource-intensive for 1 GB Pi 4) but the models can be kept in
-  `/home/voice/piper-models/` for testing on beefier hardware.
+- **Piper models** are optional. Piper TTS works but overloads a Pi 4 (1 GB RAM).
+  Install it if you want local TTS, but expect resource contention. See
+  `piper-tts-setup.md` for details. Models go in `/home/voice/piper-models/`.
 - **The `agent` user** (Cursor CLI subprocess) is provisioned separately — see
   `agent-user-setup.md`. It is independent of `voice` and has its own home,
   credentials, and repo checkout.

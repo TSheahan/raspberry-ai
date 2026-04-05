@@ -1,8 +1,8 @@
 # Piper TTS Setup
 
-Installs the Piper TTS engine and voice model used by `forked_assistant/src/master.py`
-(step 8) to synthesise agent responses for playback through the bcm2835 headphone
-output. Applies to the `/home/voice/venv/` virtual environment on morpheus.
+Optional local TTS engine. Piper works but overloads a Pi 4 with 1 GB RAM —
+cloud TTS backends (Cartesia, ElevenLabs, Deepgram) are used in production.
+Install Piper if you want offline TTS or are testing on beefier hardware.
 
 ---
 

@@ -9,7 +9,7 @@ voice agent appliance (1 GB RAM, ARM64, piwheels dependency).
 
 A satisfactorily hardened system exhibits **all** of the following:
 
-- uv refuses packages uploaded fewer than seven days ago (global cooldown)
+- If uv is installed, it refuses packages uploaded fewer than seven days ago (global cooldown)
 - pip is barred from installing into the system Python — only virtual environments
   are permitted
 - Wheels are preferred over source distributions to avoid executing build scripts
@@ -19,7 +19,10 @@ A satisfactorily hardened system exhibits **all** of the following:
 
 ## Applied on This Pi
 
-### 1. Dependency cooldown — uv (globally enforced)
+### 1. Dependency cooldown — uv (if installed)
+
+The project's stance toward uv is under-developed. uv is not currently installed
+on the Pi. If it is installed, the cooldown configuration below should apply.
 
 uv supports a relative cooldown natively in its global config.
 
@@ -159,9 +162,9 @@ exclude-newer = "P7D"
 ## Verify
 
 ```bash
-# 1. uv cooldown active
-cat ~/.config/uv/uv.toml
-# Expected: exclude-newer = "P7D"
+# 1. uv cooldown (only if uv is installed)
+which uv && cat ~/.config/uv/uv.toml
+# Expected (if installed): exclude-newer = "P7D"
 
 # 2. venv enforcement
 echo $PIP_REQUIRE_VIRTUALENV

@@ -40,7 +40,9 @@ section and determine "am I already done?" without executing anything.
 
 Step-by-step commands to reach the target state from a clean baseline. Numbered,
 copy-pasteable, with prerequisites stated up front. Each step should be idempotent
-where possible (re-running does not break an already-provisioned system).
+where possible (re-running does not break an already-provisioned system). Agentic
+instruction (natural language directed at an agent) is acceptable here when it is
+a better fit than a shell command — these files are for agents most of all.
 
 ### Verify (observable)
 
@@ -62,6 +64,8 @@ Each file owns exactly one provisioning domain:
 | `priority-permissions.md` | Real-time scheduling, CPU pinning, and process priority |
 
 New profiles should follow the same three-section pattern and own a single concern.
+Not all existing files fully conform to this structure yet — they should be
+updated to converge toward it over time.
 
 ## Key Constraints
 
