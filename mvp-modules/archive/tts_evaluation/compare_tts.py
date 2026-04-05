@@ -275,6 +275,7 @@ def _run_cartesia_sentence(
     try:
         with client.tts.websocket_connect() as connection:
             connection.send({
+                "context_id": "eval",
                 "model_id": model,
                 "transcript": text,
                 "voice": {"mode": "id", "id": voice_id},
@@ -294,8 +295,9 @@ def _run_cartesia_sentence(
                     if save_path:
                         pcm_buffer.append(response.audio)
                 elif response.type == "error":
-                    raw = response.model_dump() if hasattr(response, "model_dump") else vars(response)
-                    logger.error("[cartesia] API error  full_response={}", raw)
+                    msg = getattr(response, "message", None) or getattr(response, "error", None)
+                    logger.error("[cartesia] API error  status={}  message={!r}",
+                                 getattr(response, "status_code", "?"), msg)
                     break
                 elif response.type == "done":
                     break

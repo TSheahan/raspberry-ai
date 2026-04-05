@@ -288,6 +288,7 @@ class CartesiaTTS(TTSBackend):
             bytes_written = 0
             with self._client.tts.websocket_connect() as connection:
                 connection.send({
+                    "context_id": "tts",
                     "model_id": self._model,
                     "transcript": text,
                     "voice": {"mode": "id", "id": self._voice_id},
@@ -302,11 +303,9 @@ class CartesiaTTS(TTSBackend):
                         out.write(response.audio)
                         bytes_written += len(response.audio)
                     elif response.type == "error":
-                        logger.error(
-                            "[tts] cartesia API error  status={}  error={!r}",
-                            getattr(response, "status_code", "?"),
-                            getattr(response, "error", "?"),
-                        )
+                        msg = getattr(response, "message", None) or getattr(response, "error", None)
+                        logger.error("[tts] cartesia API error  status={}  message={!r}",
+                                     getattr(response, "status_code", "?"), msg)
                         break
                     elif response.type == "done":
                         break
