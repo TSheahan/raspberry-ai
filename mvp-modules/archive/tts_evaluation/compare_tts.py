@@ -285,6 +285,13 @@ def _run_cartesia_sentence(
                 },
             })
             for response in connection:
+                logger.debug(
+                    "[cartesia] ws response  type={!r}  done={!r}  audio_len={}  attrs={}",
+                    getattr(response, "type", "???"),
+                    getattr(response, "done", "???"),
+                    len(response.audio) if getattr(response, "audio", None) else 0,
+                    [a for a in dir(response) if not a.startswith("_")],
+                )
                 if response.type == "chunk" and response.audio:
                     if first_chunk_ms is None:
                         first_chunk_ms = (time.monotonic() - t0) * 1000
@@ -293,7 +300,7 @@ def _run_cartesia_sentence(
                     total_bytes += len(response.audio)
                     if save_path:
                         pcm_buffer.append(response.audio)
-                elif response.done:
+                elif response.type == "done":
                     break
     finally:
         out.close()
