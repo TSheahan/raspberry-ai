@@ -1,4 +1,3 @@
-
 ## Agent subprocess shutdown — weaknesses and options
 
 **Observation:** The Cursor `agent` process (or its children) can **outlive** `master.py` or remain running when the operator expects a clean shutdown.
@@ -7,8 +6,8 @@ Below: how the current code behaves, why gaps exist, and options to harden guara
 
 ### Current behaviour (reference)
 
-- [agent_session.py](agent_session.py) `CursorAgentSession.close()` — if `Popen.poll()` is still `None`, calls `terminate()`, `wait(timeout=3)`, then `kill()` on timeout. Clears `_process`.
-- [master.py](master.py) `master_loop` — `finally:` calls `agent.close()` then `tts.close()`. Runs on normal return (`SHUTDOWN_COMMENCED`), exceptions from the pipe loop, and (for `KeyboardInterrupt` raised inside the loop) after the `finally` runs before `main()` handles it.
+- [agent_session.py](../forked_assistant/src/agent_session.py) `CursorAgentSession.close()` — if `Popen.poll()` is still `None`, calls `terminate()`, `wait(timeout=3)`, then `kill()` on timeout. Clears `_process`.
+- [master.py](../forked_assistant/src/master.py) `master_loop` — `finally:` calls `agent.close()` then `tts.close()`. Runs on normal return (`SHUTDOWN_COMMENCED`), exceptions from the pipe loop, and (for `KeyboardInterrupt` raised inside the loop) after the `finally` runs before `main()` handles it.
 - Subprocess is started with **`start_new_session=True`** so the spawned process is a new session leader (see `Popen` in `prepare()`).
 
 ### Weaknesses
@@ -50,5 +49,5 @@ After any change:
 
 ## Related memory
 
-- [../../memory/shutdown_and_buffer_patterns.md](../../memory/shutdown_and_buffer_patterns.md) — recorder/master shutdown protocol.
-- [../archive/2026-04-04_wrapped_cursor_agent_context.md](../archive/2026-04-04_wrapped_cursor_agent_context.md) — Cursor CLI stream-json schema.
+- [shutdown_and_buffer_patterns.md](../memory/shutdown_and_buffer_patterns.md) — recorder/master shutdown protocol.
+- [2026-04-04_wrapped_cursor_agent_context.md](../forked_assistant/archive/2026-04-04_wrapped_cursor_agent_context.md) — Cursor CLI stream-json schema.
