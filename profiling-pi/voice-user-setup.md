@@ -4,8 +4,9 @@
 appliance. This is the first provisioning step on a fresh Pi — everything else
 (venv, agent user, pip hardening) depends on this user and home directory existing.
 
-The `voice` user replaces the default `user` account. The Pi is treated as a
-single-purpose appliance: `voice` exists primarily to host the voice agent.
+The Pi is treated as a single-purpose appliance: `voice` exists primarily to
+own and run the voice agent. A separate privileged user (e.g. `pi`) handles
+provisioning and system administration.
 
 ---
 
@@ -21,7 +22,7 @@ single-purpose appliance: `voice` exists primarily to host the voice agent.
 ## Target State
 
 - Linux user `voice` exists with home at `/home/voice`
-- `voice` is in groups: `audio`, `gpio`, `sudo`
+- `voice` is in groups: `audio`, `gpio`
 - Repository checked out at `/home/voice/raspberry-ai`
 - Python venv at `/home/voice/venv/` (single venv, one purpose)
 - `.env` at `/home/voice/.env` with API keys (never committed)
@@ -32,13 +33,12 @@ single-purpose appliance: `voice` exists primarily to host the voice agent.
 ## 1. Create the `voice` User
 
 ```bash
-sudo useradd -m -d /home/voice -s /bin/bash -G audio,gpio,sudo voice
+sudo useradd -m -d /home/voice -s /bin/bash -G audio,gpio voice
 sudo passwd voice
 ```
 
 - `-m` — create home directory
-- `-G audio,gpio,sudo` — audio for ALSA device access, gpio for hardware,
-  sudo for provisioning (can be removed once setup is complete)
+- `-G audio,gpio` — audio for ALSA device access, gpio for hardware
 
 ---
 
@@ -71,34 +71,42 @@ No stray venvs in unrelated directories. One user, one venv, one purpose.
 
 ## 3. Clone the Repository
 
-```bash
-sudo -iu voice
+Install `gh` as the privileged user, then authenticate and clone as `voice`:
 
-# Install and authenticate gh (GitHub CLI)
+```bash
+# As the privileged user (e.g. pi):
 sudo apt install -y gh
-gh auth login
+
+# Authenticate as voice — prints a device code; open github.com/login/device
+# on any browser and enter it
+sudo -u voice -H gh auth login
 # Select: GitHub.com → HTTPS → Login with a web browser
 
-gh auth setup-git
-git clone https://github.com/TSheahan/raspberry-ai /home/voice/raspberry-ai
+sudo -u voice -H gh auth setup-git
+sudo -u voice -H git clone https://github.com/TSheahan/raspberry-ai /home/voice/raspberry-ai
 ```
 
 ---
 
 ## 4. Create the Python venv
 
-```bash
-sudo -iu voice
-python3 -m venv /home/voice/venv
-source /home/voice/venv/bin/activate
+Install the build dependency as the privileged user, then create the venv and
+install packages as `voice`:
 
-# Core deps — install order matters: native extensions first
+```bash
+# As the privileged user (e.g. pi):
 sudo apt install -y libasound2-dev      # build dep for pyalsaaudio
-pip install pyalsaaudio                  # ALSA audio output (Linux-only)
-pip install python-dotenv                # .env loading
-pip install deepgram-sdk                 # STT + tertiary TTS
-pip install cartesia                     # primary TTS
-pip install elevenlabs                   # fallback TTS
+
+# As voice:
+sudo -u voice -H python3 -m venv /home/voice/venv
+sudo -u voice -H bash -c '
+  source /home/voice/venv/bin/activate
+  pip install pyalsaaudio                  # ALSA audio output (Linux-only)
+  pip install python-dotenv                # .env loading
+  pip install deepgram-sdk                 # STT + tertiary TTS
+  pip install cartesia                     # primary TTS
+  pip install elevenlabs                   # fallback TTS
+'
 ```
 
 After installing, proceed to `pip-hardening.md` to lock down the venv against
@@ -116,7 +124,7 @@ ELEVENLABS_API_KEY=<your-key>
 ANTHROPIC_API_KEY=<your-key>
 AGENT_USER=agent
 AGENT_BIN=/home/agent/.local/bin/agent
-AGENT_WORKSPACE=/home/agent/raspberry-ai
+AGENT_WORKSPACE=/home/agent/personal
 EOF
 
 chmod 600 /home/voice/.env
@@ -133,7 +141,7 @@ cd /home/voice/raspberry-ai
 
 # 1. User and groups
 id voice
-# Expected: uid=...(voice) gid=...(voice) groups=...(audio),(gpio),(sudo)
+# Expected: uid=...(voice) gid=...(voice) groups=...(audio),(gpio)
 
 # 2. Repo present
 git -C /home/voice/raspberry-ai status
@@ -161,8 +169,8 @@ python mvp-modules/forked_assistant/src/tts.py -b elevenlabs "Testing as voice u
 
 - **No root privileges needed at runtime.** `master.py` requires only ALSA device
   access (`audio` group) and real-time scheduling privileges (see
-  `priority-permissions.md`). The `sudo` group membership is for provisioning only
-  and can be revoked on a hardened appliance.
+  `priority-permissions.md`). `voice` has no sudo access — provisioning is
+  performed by a privileged user (e.g. `pi`).
 - **Single venv at `/home/voice/venv/`.** Previous deployments scattered venvs
   across `~/pipecat-agent/venv/`, `~/deepgram-benchmark-venv/`, etc. A fresh
   `voice` user starts clean.

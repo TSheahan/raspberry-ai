@@ -31,9 +31,9 @@ source /home/voice/venv/bin/activate
 pip install piper-tts
 ```
 
-The cooldown wrapper in `/etc/profile.d/pip-cooldown.sh` applies automatically —
-this rejects packages uploaded within the last seven days. `piper-tts` is a
-mature package (well past the cooldown window) so no bypass is needed.
+The uv cooldown (`~/.config/uv/uv.toml`, see `pip-hardening.md`) rejects packages
+uploaded within the last seven days. `piper-tts` is a mature package (well past
+the cooldown window) so no bypass is needed.
 
 ### 3. Download the voice model
 

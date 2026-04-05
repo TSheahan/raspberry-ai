@@ -9,27 +9,30 @@
 ## Prerequisites
 
 - `voice` user exists and is provisioned (see `voice-user-setup.md`)
-- `voice` has `sudo` access (for provisioning steps below)
-- Run all commands below as `voice` via `sudo` where required
+- A privileged user with `sudo` access is available for provisioning (e.g. `pi`)
+- Run all provisioning commands below as the privileged user via `sudo`
+- `voice` itself has **no** broad sudo — only the narrow NOPASSWD entry created in step 5
 
 ---
 
 ## 1. Create the `agent` Linux User
 
 ```bash
-sudo useradd -r -m -d /home/agent -s /usr/sbin/nologin agent
+sudo useradd -r -m -d /home/agent -s /bin/bash agent
 ```
 
 - `-r` — system user (no aging, below UID_MIN)
 - `-m` — create home directory
 - `-d /home/agent` — explicit home
-- `-s /usr/sbin/nologin` — no interactive login shell
+- `-s /bin/bash` — interactive shell for maintenance via `sudo -iu agent`
+
+Remote login is blocked at the SSH layer (see step 5a), not via nologin.
 
 ---
 
 ## 2. Install the Cursor CLI for `agent`
 
-`agent` owns the Cursor CLI install end-to-end. The `voice` account does not need the binary.
+`agent` owns the Cursor CLI install end-to-end. Neither `voice` nor the profiling user needs this binary — the profiling user may already have its own Cursor CLI install available for profiling tasks.
 
 ```bash
 sudo -u agent -H bash -c 'curl https://cursor.com/install -fsS | bash'
@@ -51,11 +54,7 @@ Authentication is handled during installation (step 2) if the installer prompts
 for login. If not, authenticate separately:
 
 ```bash
-# Temporarily allow a login shell for agent, authenticate, then restore
-# TODO: next profiling can adopt shell lockout IF it won't break agentic operations on the repository
-sudo usermod -s /bin/bash agent
 sudo -u agent -H /home/agent/.local/bin/agent login
-sudo usermod -s /usr/sbin/nologin agent
 ```
 
 Verify:
@@ -66,13 +65,13 @@ sudo -u agent -H /home/agent/.local/bin/agent status
 
 Expected: shows authenticated account and subscription.
 
-**Contingency:** root can access the binary at `/home/agent/.local/bin/agent` directly and re-authenticate if needed. `voice` does not need access to it for normal operation.
+**Contingency:** the profiling user (or root) can access the binary at `/home/agent/.local/bin/agent` directly and re-authenticate if needed. `voice` does not need access to it for normal operation.
 
 ---
 
 ## 4. Set Up the Agent Workspace
 
-The agent operates on a checkout of `main` from `https://github.com/TSheahan/raspberry-ai`. Authentication is via the GitHub CLI device flow — no password, no SSH key required.
+The agent operates on a checkout of `main` from `https://github.com/TSheahan/personal`. Authentication is via the GitHub CLI device flow — no password, no SSH key required.
 
 ### 4a. Install and authenticate `gh` as `agent`
 
@@ -81,9 +80,7 @@ sudo apt install gh
 
 # Authenticate as agent — prints a device code; open github.com/login/device
 # on any browser and enter it
-sudo usermod -s /bin/bash agent
 sudo -u agent -H gh auth login
-sudo usermod -s /usr/sbin/nologin agent
 ```
 
 At the prompts select: **GitHub.com → HTTPS → Login with a web browser**.
@@ -98,7 +95,7 @@ sudo -u agent -H gh auth status
 
 ```bash
 sudo -u agent -H gh auth setup-git
-sudo -u agent -H git clone https://github.com/TSheahan/raspberry-ai /home/agent/raspberry-ai
+sudo -u agent -H git clone https://github.com/TSheahan/personal /home/agent/personal
 ```
 
 `gh auth setup-git` persists the credential helper so subsequent `git pull` calls inside the checkout also authenticate without prompting.
@@ -123,6 +120,35 @@ Expected: `...file parsed OK`
 
 ---
 
+## 5a. Block Remote Login for Appliance Users
+
+Both `voice` and `agent` keep `/bin/bash` for local maintenance (`sudo -iu voice`, `sudo -iu agent`). Remote login is blocked at the SSH layer:
+
+```bash
+echo 'DenyUsers voice agent' | \
+  sudo tee /etc/ssh/sshd_config.d/deny-appliance-users.conf
+sudo chmod 644 /etc/ssh/sshd_config.d/deny-appliance-users.conf
+sudo sshd -t && sudo systemctl reload sshd
+```
+
+Verify:
+
+```bash
+ssh -o BatchMode=yes -o ConnectTimeout=3 -o StrictHostKeyChecking=no \
+  voice@localhost echo "should fail" 2>&1
+# Expected: Permission denied
+
+ssh -o BatchMode=yes -o ConnectTimeout=3 -o StrictHostKeyChecking=no \
+  agent@localhost echo "should fail" 2>&1
+# Expected: Permission denied
+
+# Local sudo access still works
+sudo -iu voice echo "voice ok"
+sudo -iu agent echo "agent ok"
+```
+
+---
+
 ## 6. Verify the Full Invocation Path
 
 Test that `voice` can run the agent binary as `agent` from a non-TTY context (matching the Popen execution environment):
@@ -142,7 +168,7 @@ Add to `/home/voice/.env` (for `load_dotenv` to find):
 ```
 AGENT_USER=agent
 AGENT_BIN=/home/agent/.local/bin/agent
-AGENT_WORKSPACE=/home/agent/raspberry-ai
+AGENT_WORKSPACE=/home/agent/personal
 ```
 
 ---
