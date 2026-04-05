@@ -6,34 +6,26 @@ step 9 (looping) can be formally validated.
 
 ---
 
-## 1. TTS rearchitecture — blocking
+## 1. TTS rearchitecture — RESOLVED (sessions 1–5, 2026-04-05)
 
-**Status:** design decision required before next Pi session.
+**Status:** evaluation and tuning complete. `master.py` swap pending (Phase 3 Pi run).
 
 **What happened:** OOM killer fired during Piper synthesis on the 1 GB Pi 4
 (`en_US-lessac-medium`, ~63 MB ONNX). At time of kill, master.py had 317 MB RSS
-+ 385 MB in swap = ~700 MB footprint. Total swap (900 MB) was exhausted. The
-kernel sent SIGKILL to master.py; the recorder_child survived and ran until
-Pipecat's built-in idle timeout fired (~4 min later).
++ 385 MB in swap = ~700 MB footprint. Audio tearing also observed.
 
-Additionally, audio tearing was observed on the existing Piper model during
-playback — quality is below acceptable threshold for intended use cases.
+**Resolution:** All three cloud backends evaluated and tuned. Platform precedence
+and voice selections locked. `tts.py` defaults set — `CartesiaTTS()` requires no args.
 
-**Disposition:** off-device TTS synthesis is under consideration. Candidate
-options not yet evaluated:
-- ElevenLabs streaming API
-- Cartesia (low-latency streaming)
-- Deepgram Aura
-- Kokoro (cloud-hosted or lightweight ONNX variant)
+| Priority | Backend | Voice | Role |
+|----------|---------|-------|------|
+| 1 | Cartesia | Allie (`2747b6cf-...`) | Primary — ~49 MB RSS, streaming |
+| 2 | ElevenLabs | Matilda (`XrExE9yK...`) | Fallback — ~350ms warm first-chunk |
+| 3 | Deepgram | Helena (`aura-2-helena-en`) | Tertiary — REST-only, click artifact |
 
-**What's needed:** select a TTS target, evaluate latency and quality against
-the 1 s first-audio target, then replace `PiperTTS` in `src/tts.py` with the
-new backend. `master.py` integration point is `tts.play(agent.run(transcript))`
-— any implementation that accepts an `Iterator[str]` and plays audio satisfies
-the interface.
-
-`src/tts.py` and the `PiperTTS` class remain as a reference implementation and
-can be archived once a replacement is proven.
+**Remaining:** swap `PiperTTS` → `CartesiaTTS` in `master.py`, wire `tts.warm()` at
+`WAKE_DETECTED` (threaded). See `forked_assistant/AGENTS.md § Phase 3` for exact
+changes. Full record: `archive/tts_evaluation/`.
 
 ---
 
@@ -57,9 +49,9 @@ OOM scenario becomes less likely. Revisit after TTS decision.
 
 ---
 
-## 3. Step 9 formal validation — blocked on item 1
+## 3. Step 9 formal validation — unblocked (pending Phase 3 Pi run)
 
-**Status:** deferred until TTS is stable.
+**Status:** unblocked once Phase 3 (CartesiaTTS swap + warm() + Pi run) completes.
 
 **What's needed:** 3–5 complete turns with latency measurements table filled
 (per `starting_brief.md`). The pipeline already loops correctly (SET_WAKE_LISTEN

@@ -84,21 +84,56 @@ Test files add `sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..',
 
 ## What's Next
 
-### Step 8 complete — quality improvements in progress
+### Phase 3 — CartesiaTTS integration + Pi run (CURRENT — step 8 delivery)
 
-EU-7 proven 2026-04-04. Full pipeline run: "Tell me about the rules you know." → STT (0.45s) → CursorAgentSession (11.3s to result, 7.3s agent duration) → PiperTTS → audio through 3.5mm jack. Clean Ctrl+C from wake_listen. 2/8509 duty frames over budget (0.0%).
+PiperTTS was rejected after EU-7 proof run: OOM kill (317 MB RSS + 385 MB swap on
+1 GB Pi) and audio tearing. Cloud TTS evaluation complete (sessions 1–5, 2026-04-05).
+See `archive/tts_evaluation/` for full record.
 
-One quality item remains:
+**Selected backend: Cartesia** (primary). `tts.py` defaults are already set — `CartesiaTTS()`
+requires no arguments (Allie, speed 0.85). Fallback: ElevenLabs/Matilda. Tertiary:
+Deepgram/Helena. All three implemented as `TTSBackend` subclasses.
 
-1. **Markdown stripping** (done — `tts.py`) — agent responses containing `**bold**` were read as "asterisk asterisk bold asterisk asterisk" by Piper. `_strip_markdown()` in `tts.py` now removes bold/italic, headers, list bullets, and inline code before synthesis.
+**Three changes needed in `master.py` before the Pi run:**
 
-**Live-sentence streaming done** (`agent_session.py`) — `run()` now yields sentence chunks live as streaming deltas arrive (`_flush_sentences()` buffers to `[.!?]` boundaries). Tail reconciliation against `result.result` handles three cases: normal prefix match (yield tail), nothing yielded live (yield full canonical), tool-call re-emission mismatch (flush buffer only). First audio expected ~2s after VAD_STOPPED on the next Pi run.
+1. **Swap backend** — replace `PiperTTS` with `CartesiaTTS`:
+   ```python
+   # remove:
+   from tts import PiperTTS
+   tts = PiperTTS(_PIPER_MODEL_PATH)
+   # add:
+   from tts import CartesiaTTS, TTSBackend
+   tts = CartesiaTTS()
+   ```
+   Update `cognitive_loop` type annotation: `tts: PiperTTS` → `tts: TTSBackend`.
 
-**Response brevity** is the remaining latency lever: a 173-token 4-point list produces ~54s of audio. The agent has a voice-interface rule but didn't apply it strongly here. This is a persona/prompt tuning concern, not a pipeline code issue.
+2. **Wire `tts.warm()`** — call at `WAKE_DETECTED`, threaded alongside `agent.prepare()`,
+   so the cold-start penalty is absorbed during the STT window:
+   ```python
+   elif cmd == "WAKE_DETECTED":
+       agent.prepare()
+       threading.Thread(target=tts.warm, daemon=True).start()
+       # ... existing capture thread start
+   ```
+   Measured cold-start costs (session 4): Cartesia ~1.3s → ~1.0s warm;
+   ElevenLabs ~2.8s → ~350ms warm. Warm-up is non-fatal — backend logs and continues
+   on failure.
 
-### Step 9 — loop (wake → turn → wake)
+3. **Load `.env`** — `CARTESIA_API_KEY` (and `ELEVENLABS_API_KEY`) must be present.
+   Confirm `.env` is loaded at master.py startup (already done for `DEEPGRAM_API_KEY`).
 
-Pipeline already loops: `SET_WAKE_LISTEN` is sent after `cognitive_loop` returns, and clean turns have been observed across multiple EU-5/EU-6 runs. Formal step 9 validation (3–5 complete turns, latency measurements table) follows the live-sentence streaming improvement.
+**Pi run validation targets (Phase 3):**
+- Time-to-first-audio < 2s post-VAD_STOPPED
+- No OOM (Cartesia: ~49 MB RSS — well clear of danger zone)
+- Clean Ctrl+C from wake_listen
+- 3 consecutive turns without degradation
+- Measure warm() vs no-warm() first-turn latency delta
+
+### Step 9 — loop validation (follows Phase 3)
+
+Pipeline already loops: `SET_WAKE_LISTEN` sent after `cognitive_loop` returns; clean
+multi-turn observed across EU-5/EU-6 runs. Formal step 9 validation (3–5 complete
+turns, latency measurements table) follows Phase 3 Pi run.
 
 ## Completed Effort Units
 

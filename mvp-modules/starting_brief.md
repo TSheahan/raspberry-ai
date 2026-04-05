@@ -6,6 +6,21 @@
 
 ---
 
+## Current delivery status (updated 2026-04-05)
+
+| Step | Status |
+|------|--------|
+| 1–7 | Complete — two-process forked architecture (`mvp-modules/forked_assistant/`) |
+| 8 (TTS) | PiperTTS rejected (OOM kill + audio tearing on 1 GB Pi 4). Cloud TTS selected: **Cartesia/Allie** (primary), ElevenLabs/Matilda (fallback), Deepgram/Helena (tertiary). `tts.py` defaults set. `master.py` swap + `warm()` wiring pending — see `forked_assistant/AGENTS.md § Phase 3`. |
+| 9 (loop) | Unblocked after Phase 3 Pi run. Pipeline already loops mechanically. |
+
+**Active work:** `mvp-modules/forked_assistant/` and `mvp-modules/archive/tts_evaluation/`.
+Historical brief content below is preserved as-written.
+
+---
+
+---
+
 ## Host environment
 
 | Item | Value |
