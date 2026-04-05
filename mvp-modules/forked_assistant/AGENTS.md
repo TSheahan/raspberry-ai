@@ -26,12 +26,13 @@ forked_assistant/
 │   ├── stub_contracts.md          ← EU-3 parallel tracks: stub vs real IPC
 │   ├── agent_session_spec.md      ← EU-6: AgentSession abstract interface + CursorAgentSession contract
 │   └── implementation_framework.md ← EU phasing, session principles, dependency graph (READ FIRST)
-├── src/               ← library code
+├── src/               ← library code (see src/AGENTS.md for index + agent shutdown analysis)
+│   ├── AGENTS.md                 ← file index; Cursor agent subprocess shutdown notes
 │   ├── ring_buffer.py             ← SharedMemory ring: writer/reader, header format
 │   ├── recorder_state.py         ← RecorderState base class: phase logic, processor hooks
 │   ├── recorder_child.py         ← EU-3d: merged recorder subprocess (RecorderChild + Pipecat pipeline)
 │   ├── agent_session.py          ← EU-6: AgentSession base + CursorAgentSession implementation
-│   ├── tts.py                    ← EU-7: PiperTTS wrapper (Piper ONNX + PyAudio device 0)
+│   ├── tts.py                    ← EU-7: TTSBackend + cloud backends + _AudioOut
 │   └── master.py                 ← EU-5/EU-6/EU-7: streaming STT + agent + TTS
 ├── test/              ← harnesses and smoke tests
 │   ├── smoke_test_shm.py         ← EU-1+EU-2: SharedMemory and ring buffer IPC tests
