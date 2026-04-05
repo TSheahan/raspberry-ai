@@ -4,7 +4,7 @@ tts.py — TTS backends for forked_assistant (step 8).
 Architecture
 ------------
 TTSBackend (abstract)
-    warm() -> None                — prime connection; call once during non-blocking window
+    warm() -> None                — prime network path (Cartesia: open wss only)
     play(Iterator[str]) -> None   — synthesise and play sentence chunks; blocks until done
     close() -> None               — release audio resources at process exit
 
@@ -27,14 +27,16 @@ tts_evaluation session 2 (2026-04-05). See _AudioOut class.
 
 Usage (from master.py):
     tts = CartesiaTTS()               # primary backend; defaults to Allie, speed 0.85
-    tts.warm()                        # call during STT/agent init to absorb cold-start
-    tts.play(agent.run(transcript))   # blocks until all audio is played
-    tts.close()                       # call once at process exit
+    tts.warm()                        # pre-establish wss (reuses socket for play())
+    tts.play(agent.run(transcript))   # same WebSocket; one context_id per sentence chunk
+    tts.close()                       # closes WebSocket + audio at process exit
 """
 
 import os
 import re
 import sys
+import threading
+import uuid
 from abc import ABC, abstractmethod
 from collections.abc import Iterator
 from pathlib import Path
@@ -131,14 +133,13 @@ class TTSBackend(ABC):
     """
 
     def warm(self) -> None:
-        """Prime the backend's network connection and server-side model.
+        """Prime whatever cold path the backend has before the first real :meth:`play`.
 
-        Sends a minimal throwaway synthesis request — audio bytes are discarded.
-        Call once after construction, ideally during a non-blocking window (e.g.
-        while STT is transcribing) so the first real play() call doesn't pay
-        the cold-start penalty.
+        Typical examples: open an HTTP session, establish a WebSocket, or run a
+        cheap API probe. Implementations choose what actually helps; audio from
+        any probe should not be played unless that is the product intent.
 
-        Measured cold-start costs (session 4 warm-start investigation):
+        Measured cold-start costs (session 4 warm-start investigation, pre–socket-reuse):
             ElevenLabs  ~2.8s first call → ~350ms after warm
             Cartesia    ~1.3s first call → ~1.0s after warm
             Deepgram    ~1.3s first call → ~1.0s after warm
@@ -169,17 +170,30 @@ class TTSBackend(ABC):
 class DeepgramTTS(TTSBackend):
     """Synthesise and play streamed text chunks via Deepgram Aura REST API.
 
+    **Precedence:** Cartesia (primary) → ElevenLabs → Deepgram (this class).
+    One backend per process via ``TTS_BACKEND``; no automatic fallback.
+
+    **Why this backend exists:** optional third voice reusing ``DEEPGRAM_API_KEY``
+    from streaming STT — same vendor, separate API (Aura **Speak** REST vs
+    **Listen** WebSocket). Not wired together with STT in one pipeline.
+
+    **Troubleshooting scope:** production TTS issues in this project (e.g.
+    long-utterance WebSocket behaviour) concern **Cartesia**, the default
+    backend. This class is plain REST per chunk; it does not use the Deepgram
+    live transcription socket. Deepgram STT KeepAlive / ``NET-0001`` / reconnect
+    notes apply to ``master.py`` capture only — see Deepgram docs for streaming
+    STT, not for debugging Cartesia or this REST path.
+
     One API call per sentence chunk. Audio is returned as linear16 PCM and
-    written directly to a PyAudio output stream — no decode step required.
+    written through :class:`_AudioOut` — no decode step required.
 
     Environment:
         DEEPGRAM_API_KEY  — required; same key as STT (already in .env)
 
     Constructor args:
-        model      — Deepgram Aura-2 voice ID (default: aura-2-thalia-en)
+        model      — Deepgram Aura-2 voice ID (default: aura-2-helena-en)
         sample_rate — PCM sample rate returned by Deepgram (default: 24000 Hz)
-        speed      — speaking rate multiplier 0.7–1.5 (default: 0.9 — slightly
-                     slower for clear voice assistant delivery)
+        speed      — speaking rate multiplier (default: 1.05)
 
     Evaluation status: see archive/tts_evaluation/effort_log.md
     """
@@ -206,6 +220,9 @@ class DeepgramTTS(TTSBackend):
         )
 
     def warm(self) -> None:
+        # TODO: Replace with provider-appropriate priming (REST is not the same as
+        # Cartesia’s “open one long-lived socket” model). This throwaway "." call
+        # is legacy; measure whether session keep-alive or a HEAD/ping helps instead.
         logger.debug("[tts] DeepgramTTS warming up")
         t0 = __import__("time").monotonic()
         self._synthesise(".")
@@ -278,10 +295,10 @@ class CartesiaEmotion:
 class CartesiaTTS(TTSBackend):
     """Synthesise and play streamed text chunks via Cartesia WebSocket API.
 
-    Cartesia uses WebSocket streaming — audio chunks begin arriving within
-    ~200ms of the first request. Each chunk is written to the PyAudio stream
-    as it arrives, so playback and synthesis overlap. This gives a lower
-    time-to-first-audio than the Deepgram REST path for the same sentence.
+    Uses **one** WebSocket (``wss://…/tts/websocket``) for the lifetime of the
+    backend: opened in :meth:`warm` (or lazily on first :meth:`play` if warm was
+    skipped), multiplexing generations with a **fresh** ``context_id`` per
+    sentence, matching Cartesia’s recommended pattern.
 
     Prerequisites:
         pip install cartesia          (not yet in Pi venv as of 2026-04-05)
@@ -318,32 +335,60 @@ class CartesiaTTS(TTSBackend):
         self._sample_rate = sample_rate
         self._speed = speed
         self._emotion = emotion
+        self._ws_lock = threading.RLock()
+        self._ws = None  # TTSResourceConnection | None
+        self._ws_manager = None  # TTSResourceConnectionManager — retained for SDK reconnect path
         logger.info(
             "[tts] CartesiaTTS ready  model={}  voice={}  sample_rate={}  speed={}  emotion={}",
             model, voice_id, sample_rate, speed, emotion,
         )
 
+    def _voice_spec(self) -> dict:
+        return {"mode": "id", "id": self._voice_id}
+
+    def _output_format(self) -> dict:
+        return {
+            "container": "raw",
+            "encoding": "pcm_s16le",
+            "sample_rate": self._sample_rate,
+        }
+
+    def _generation_config_dict(self) -> dict | None:
+        gen_cfg: dict = {}
+        if self._speed is not None:
+            gen_cfg["speed"] = self._speed
+        if self._emotion is not None:
+            gen_cfg["emotion"] = self._emotion
+        return gen_cfg or None
+
+    def _open_connection_if_needed(self) -> None:
+        """Open a single shared WebSocket; caller must hold :attr:`_ws_lock`."""
+        if self._ws is not None:
+            return
+        mgr = self._client.tts.websocket_connect()
+        self._ws_manager = mgr
+        self._ws = mgr.enter()
+
+    def _close_connection_unlocked(self) -> None:
+        if self._ws is not None:
+            try:
+                self._ws.close()
+            except Exception:
+                logger.exception("[tts] Cartesia WebSocket close failed")
+            self._ws = None
+        self._ws_manager = None
+
     def warm(self) -> None:
-        logger.debug("[tts] CartesiaTTS warming up")
+        """Pre-establish the shared WebSocket (Cartesia: set up before first generation)."""
+        logger.debug("[tts] CartesiaTTS warming up (WebSocket only)")
         t0 = __import__("time").monotonic()
         try:
-            with self._client.tts.websocket_connect() as connection:
-                connection.send({
-                    "context_id": "warm",
-                    "model_id": self._model,
-                    "transcript": ".",
-                    "voice": {"mode": "id", "id": self._voice_id},
-                    "output_format": {
-                        "container": "raw",
-                        "encoding": "pcm_s16le",
-                        "sample_rate": self._sample_rate,
-                    },
-                })
-                for response in connection:
-                    if response.type in ("done", "error"):
-                        break
+            with self._ws_lock:
+                self._open_connection_if_needed()
         except Exception:
             logger.exception("[tts] CartesiaTTS warm-up failed (non-fatal)")
+            with self._ws_lock:
+                self._close_connection_unlocked()
         logger.info("[tts] CartesiaTTS warm  {:.0f}ms", (__import__("time").monotonic() - t0) * 1000)
 
     def play(self, text_chunks: Iterator[str]) -> None:
@@ -360,34 +405,38 @@ class CartesiaTTS(TTSBackend):
             out.close()
 
     def close(self) -> None:
-        """No persistent audio resources to release (output opened per-turn)."""
+        """Close shared WebSocket."""
+        with self._ws_lock:
+            self._close_connection_unlocked()
         logger.debug("[tts] CartesiaTTS closed")
 
     def _synthesise_to_output(self, text: str, out: _AudioOut) -> None:
-        """Open a Cartesia WebSocket send and write audio chunks as they arrive."""
+        """One generation on the shared WebSocket; unique context_id per sentence."""
         try:
             bytes_written = 0
-            with self._client.tts.websocket_connect() as connection:
-                payload: dict = {
-                    "context_id": "tts",
+            with self._ws_lock:
+                self._open_connection_if_needed()
+                conn = self._ws
+                assert conn is not None
+                ctx_id = str(uuid.uuid4())
+                tctx = conn.context(
+                    ctx_id,
+                    model_id=self._model,
+                    voice=self._voice_spec(),
+                    output_format=self._output_format(),
+                )
+                send_kw: dict = {
                     "model_id": self._model,
                     "transcript": text,
-                    "voice": {"mode": "id", "id": self._voice_id},
-                    "output_format": {
-                        "container": "raw",
-                        "encoding": "pcm_s16le",
-                        "sample_rate": self._sample_rate,
-                    },
+                    "voice": self._voice_spec(),
+                    "output_format": self._output_format(),
+                    "continue_": False,
                 }
-                gen_cfg: dict = {}
-                if self._speed is not None:
-                    gen_cfg["speed"] = self._speed
-                if self._emotion is not None:
-                    gen_cfg["emotion"] = self._emotion
-                if gen_cfg:
-                    payload["generation_config"] = gen_cfg
-                connection.send(payload)
-                for response in connection:
+                gen = self._generation_config_dict()
+                if gen is not None:
+                    send_kw["generation_config"] = gen
+                tctx.send(**send_kw)
+                for response in tctx.receive():
                     if response.type == "chunk" and response.audio:
                         out.write(response.audio)
                         bytes_written += len(response.audio)
@@ -395,8 +444,6 @@ class CartesiaTTS(TTSBackend):
                         msg = getattr(response, "message", None) or getattr(response, "error", None)
                         logger.error("[tts] cartesia API error  status={}  message={!r}",
                                      getattr(response, "status_code", "?"), msg)
-                        break
-                    elif response.type == "done":
                         break
             logger.debug("[tts] cartesia wrote {} bytes", bytes_written)
         except Exception:
@@ -455,6 +502,8 @@ class ElevenLabsTTS(TTSBackend):
         )
 
     def warm(self) -> None:
+        # TODO: Replace with best-practice priming for the streaming HTTP API in use
+        # (connection/session reuse, etc.). The single "." synthesis is a blunt probe.
         logger.debug("[tts] ElevenLabsTTS warming up")
         t0 = __import__("time").monotonic()
         try:

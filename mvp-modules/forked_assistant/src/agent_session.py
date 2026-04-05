@@ -32,6 +32,7 @@ import json
 import os
 import re
 import subprocess
+import threading
 import time
 from abc import ABC, abstractmethod
 from collections.abc import Iterator
@@ -163,7 +164,7 @@ def parse_stream_line(line: str) -> dict | None:
     try:
         return json.loads(line)
     except json.JSONDecodeError:
-        logger.debug("stream line is not valid JSON: {!r}", line[:120])
+        logger.warning("[agent/stdout] not valid JSON (stream-json expected): {!r}", line[:200])
         return None
 
 
@@ -252,6 +253,7 @@ class CursorAgentSession(AgentSession):
         self._model = model
         self._agent_bin = agent_bin
         self._process: subprocess.Popen | None = None
+        self._last_spawn_used_resume: bool = False
 
     # --- AgentSession interface ---
 
@@ -266,6 +268,7 @@ class CursorAgentSession(AgentSession):
             return
 
         resuming = self._should_resume()
+        self._last_spawn_used_resume = bool(resuming and self._session_id)
         if not resuming:
             self._on_fresh_start()
 
@@ -280,7 +283,7 @@ class CursorAgentSession(AgentSession):
             "--workspace", str(self._workspace),
             "--model", self._model,
         ]
-        if resuming and self._session_id:
+        if self._last_spawn_used_resume and self._session_id:
             agent_args.extend(["--resume", self._session_id])
             logger.info("[agent] pre-spawning (resume {}...)", self._session_id[:8])
         else:
@@ -302,6 +305,7 @@ class CursorAgentSession(AgentSession):
         )
         logger.debug("[agent] pid={} workspace={} model={}",
                      self._process.pid, self._workspace, self._model)
+        logger.debug("[agent] argv: {}", cmd)
 
     def run(self, transcript: str) -> Iterator[str]:
         """Feed transcript; yield TTS-safe text chunks as the agent responds.
@@ -324,9 +328,17 @@ class CursorAgentSession(AgentSession):
             self._process = None
             raise AgentError("agent stdin broken before transcript was written") from exc
 
+        logger.info(
+            "[agent] stdin closed — waiting for stream-json on stdout  pid={}  spawn_used_resume={}  prior_session_id={}",
+            process.pid,
+            self._last_spawn_used_resume,
+            (self._session_id[:12] + "…") if self._session_id else "—",
+        )
+
         captured_session_id: str | None = None
         final_result: str | None = None
         delta_count = 0
+        first_event_logged = False
 
         # Live sentence streaming state.
         # sentence_buffer accumulates incoming delta text until a sentence
@@ -335,62 +347,89 @@ class CursorAgentSession(AgentSession):
         sentence_buffer = ""
         yielded_text = ""
 
-        for raw_line in process.stdout:
-            event = parse_stream_line(raw_line)
-            if event is None:
-                continue
+        stderr_stop = threading.Event()
 
-            event_type = event.get("type")
-            has_ts = "timestamp_ms" in event
-            short_sid = (event.get("session_id") or "")[:8] or "-"
-            logger.debug("[agent/evt] type={!r} has_ts={} sid={}", event_type, has_ts, short_sid)
+        def _drain_stderr() -> None:
+            err = process.stderr
+            if err is None:
+                return
+            try:
+                for line in iter(err.readline, ""):
+                    if stderr_stop.is_set():
+                        break
+                    line = line.rstrip()
+                    if line:
+                        logger.warning("[agent/stderr] {}", line)
+            except Exception:
+                logger.exception("[agent] stderr reader failed")
 
-            # Capture session_id from any event
-            sid = event.get("session_id")
-            if sid:
-                captured_session_id = sid
+        stderr_thread = threading.Thread(target=_drain_stderr, name="agent-stderr", daemon=True)
+        stderr_thread.start()
 
-            if event_type == "assistant":
-                delta = extract_delta_text(event)
-                logger.debug("[agent/evt] assistant has_ts={} text={!r}", has_ts, delta[:120])
-                if has_ts and delta:
-                    # Re-emission guard: after a tool call the CLI resends the
-                    # pre-tool text as a single timestamped delta. Signature:
-                    # buffer is empty (just cleared after a yield), something
-                    # was already yielded, and the delta exactly matches it.
-                    # Skip to avoid double-speaking the pre-tool sentence.
-                    if (not sentence_buffer
-                            and yielded_text
-                            and delta.strip() == yielded_text.strip()):
-                        logger.debug("[agent] re-emission detected — skipping: {!r}",
-                                     delta[:60])
-                        continue
-                    delta_count += 1
-                    sentence_buffer += delta
-                    sentences, sentence_buffer = _flush_sentences(sentence_buffer)
-                    for sentence in sentences:
-                        yielded_text += sentence + " "
-                        yield sentence
+        try:
+            for raw_line in process.stdout:
+                event = parse_stream_line(raw_line)
+                if event is None:
+                    continue
 
-            elif event_type == "result":
-                result_event: ResultEvent = event  # type: ignore[assignment]
-                final_result = result_event.get("result", "")
-                duration_ms = result_event.get("duration_ms", 0)
-                usage = result_event.get("usage", {})
-                logger.debug("[agent/evt] result is_error={} result_len={} deltas={}",
-                             result_event.get("is_error"), len(final_result), delta_count)
-                if result_event.get("is_error"):
-                    logger.error("[agent] is_error=true in result event: {}", final_result)
-                    process.wait()
-                    self._process = None
-                    raise AgentError(f"agent reported error: {final_result}")
-                logger.info("[agent] result ok  duration={}ms  out_tokens={}  cache_read={}",
-                            duration_ms,
-                            usage.get("outputTokens", "?"),
-                            usage.get("cacheReadTokens", "?"))
+                if not first_event_logged:
+                    first_event_logged = True
+                    logger.info("[agent] first stdout line parsed — stream-json flow started")
 
-            else:
-                logger.debug("[agent/evt] ignored type={!r}", event_type)
+                event_type = event.get("type")
+                has_ts = "timestamp_ms" in event
+                short_sid = (event.get("session_id") or "")[:8] or "-"
+                logger.debug("[agent/evt] type={!r} has_ts={} sid={}", event_type, has_ts, short_sid)
+
+                # Capture session_id from any event
+                sid = event.get("session_id")
+                if sid:
+                    captured_session_id = sid
+
+                if event_type == "assistant":
+                    delta = extract_delta_text(event)
+                    logger.debug("[agent/evt] assistant has_ts={} text={!r}", has_ts, delta[:120])
+                    if has_ts and delta:
+                        # Re-emission guard: after a tool call the CLI resends the
+                        # pre-tool text as a single timestamped delta. Signature:
+                        # buffer is empty (just cleared after a yield), something
+                        # was already yielded, and the delta exactly matches it.
+                        # Skip to avoid double-speaking the pre-tool sentence.
+                        if (not sentence_buffer
+                                and yielded_text
+                                and delta.strip() == yielded_text.strip()):
+                            logger.debug("[agent] re-emission detected — skipping: {!r}",
+                                         delta[:60])
+                            continue
+                        delta_count += 1
+                        sentence_buffer += delta
+                        sentences, sentence_buffer = _flush_sentences(sentence_buffer)
+                        for sentence in sentences:
+                            yielded_text += sentence + " "
+                            yield sentence
+
+                elif event_type == "result":
+                    result_event: ResultEvent = event  # type: ignore[assignment]
+                    final_result = result_event.get("result", "")
+                    duration_ms = result_event.get("duration_ms", 0)
+                    usage = result_event.get("usage", {})
+                    logger.debug("[agent/evt] result is_error={} result_len={} deltas={}",
+                                 result_event.get("is_error"), len(final_result), delta_count)
+                    if result_event.get("is_error"):
+                        logger.error("[agent] is_error=true in result event: {}", final_result)
+                        process.wait()
+                        self._process = None
+                        raise AgentError(f"agent reported error: {final_result}")
+                    logger.info("[agent] result ok  duration={}ms  out_tokens={}  cache_read={}",
+                                duration_ms,
+                                usage.get("outputTokens", "?"),
+                                usage.get("cacheReadTokens", "?"))
+
+                else:
+                    logger.debug("[agent/evt] ignored type={!r}", event_type)
+        finally:
+            stderr_stop.set()
+            stderr_thread.join(timeout=2)
 
         process.wait()
         self._process = None

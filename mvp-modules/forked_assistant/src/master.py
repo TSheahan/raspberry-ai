@@ -6,10 +6,11 @@ on core 0, then runs a synchronous event loop that:
 
   1. Waits for READY from the recorder child
   2. Sends SET_WAKE_LISTEN
-  3. On WAKE_DETECTED: pre-spawns agent subprocess (EU-6) + opens Deepgram
-     live WebSocket + starts ring-tail thread (EU-5) concurrently; sends SET_CAPTURE
-  4. On VAD_STOPPED: stops ring-tail, finalizes Deepgram stream, assembles
-     transcript, calls agent.run() → tts.play() for speech output (EU-7)
+  3. On WAKE_DETECTED: pre-spawns agent subprocess (EU-6) and opens Deepgram live
+     WebSocket + starts ring-tail thread (EU-5) concurrently; sends SET_CAPTURE
+  4. On VAD_STOPPED: stops ring-tail, finalizes Deepgram stream, assembles transcript,
+     calls cognitive_loop: primes TTS (warm) in parallel with agent.run(), then
+     tts.play() for speech output (EU-7)
   5. On response complete: sends SET_WAKE_LISTEN
   6. Handles Ctrl+C → SHUTDOWN sequence
 
@@ -17,7 +18,7 @@ STT: Deepgram Nova-3 live WebSocket (Mixed mode — Silero VAD is authoritative
 dispatch trigger; Deepgram streams in parallel and accumulates is_final results).
 Agent: CursorAgentSession (~/.local/bin/agent, stream-json, session continuity).
 TTS: CartesiaTTS (primary), ElevenLabsTTS (fallback), DeepgramTTS (tertiary).
-     Select via TTS_BACKEND env var; defaults to cartesia. See tts.py for details.
+     Select via TTS_BACKEND env var; unset or empty → cartesia. See tts.py for details.
 
 Dependencies not in requirements.txt (already installed on Pi venv):
   deepgram-sdk, python-dotenv, cartesia, elevenlabs
@@ -64,7 +65,8 @@ _AGENT_BIN = Path(os.environ.get("AGENT_BIN", str(Path.home() / ".local/bin/agen
 
 # --- TTS configuration (override via environment) ---
 # TTS_BACKEND: cartesia (default/primary), elevenlabs (fallback), deepgram (tertiary)
-_TTS_BACKEND = os.environ.get("TTS_BACKEND", "cartesia").lower()
+# Use ``or`` so unset *or* empty string (common in .env placeholders) → cartesia.
+_TTS_BACKEND = (os.environ.get("TTS_BACKEND") or "cartesia").strip().lower()
 _TTS_BACKENDS: dict[str, type[TTSBackend]] = {
     "cartesia": CartesiaTTS,
     "elevenlabs": ElevenLabsTTS,
@@ -201,6 +203,9 @@ def cognitive_loop(transcript: str, agent: AgentSession, tts: TTSBackend) -> Non
     logger.info("TRANSCRIPT: {}", transcript)
     loop_start = time.monotonic()
     try:
+        # Warm overlaps agent time-to-first-token (not at wake — avoids priming TTS
+        # during long dictation-only idle after wake).
+        threading.Thread(target=tts.warm, daemon=True).start()
         tts.play(agent.run(transcript))
     except AgentError as exc:
         logger.error("[agent] error: {}", exc)
@@ -268,7 +273,6 @@ def master_loop(pipe, shm: SharedMemory, child: Process) -> None:
     if _TTS_BACKEND not in _TTS_BACKENDS:
         raise RuntimeError(f"Unknown TTS_BACKEND={_TTS_BACKEND!r}; choose from {list(_TTS_BACKENDS)}")
     tts = _TTS_BACKENDS[_TTS_BACKEND]()
-    tts.warm()
     processing = False
     wake_pos = 0
     capture: _CaptureSession | None = None

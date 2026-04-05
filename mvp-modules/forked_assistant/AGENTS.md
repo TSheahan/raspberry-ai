@@ -12,10 +12,13 @@ This design solves the single-process shutdown crash documented in `archive/step
 
 ## Directory Layout
 
+**Python dependencies:** the Raspberry Pi venv is populated from
+`profiling-pi/venv.md` (authoritative). `mvp-modules/archive/requirements.txt` is
+**developer-only** (IDE import resolution); it is not the Pi provisioning recipe.
+
 ```
 forked_assistant/
 ├── AGENTS.md          ← you are here
-├── requirements.txt   ← Pi-authoritative version pins (see file for platform notes)
 ├── spec/              ← design specifications (read before coding)
 │   ├── architecture.md            ← high-level two-process design
 │   ├── interface_spec.md          ← ring buffer layout, pipe message shapes
@@ -107,13 +110,16 @@ Deepgram/Helena. All three implemented as `TTSBackend` subclasses.
    ```
    Update `cognitive_loop` type annotation: `tts: PiperTTS` → `tts: TTSBackend`.
 
-2. **Wire `tts.warm()`** — call at `WAKE_DETECTED`, threaded alongside `agent.prepare()`,
-   so the cold-start penalty is absorbed during the STT window:
+2. **Wire `tts.warm()`** — call at agent invocation (non-empty transcript), threaded
+   alongside `agent.run(transcript)` inside `cognitive_loop`, so the cold-start
+   penalty overlaps the agent’s time-to-first-token and **not** during wake-only
+   dictation idle:
    ```python
-   elif cmd == "WAKE_DETECTED":
-       agent.prepare()
+   def cognitive_loop(transcript, agent, tts):
+       if not transcript:
+           return
        threading.Thread(target=tts.warm, daemon=True).start()
-       # ... existing capture thread start
+       tts.play(agent.run(transcript))
    ```
    Measured cold-start costs (session 4): Cartesia ~1.3s → ~1.0s warm;
    ElevenLabs ~2.8s → ~350ms warm. Warm-up is non-fatal — backend logs and continues

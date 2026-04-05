@@ -18,8 +18,8 @@ section can be installed and verified immediately. Tier 4 (ML/pipeline) deps
 must be installed in the order shown — torch before pipecat-ai. Follow the
 sections top to bottom.
 
-**Observed totals** (2026-04-05 provisioning run): 9 direct deps + 89 transitive
-deps + pip + pip-audit = 100 packages. Venv size: 1.6 GB on disk. 375 MB RAM
+**Observed totals** (2026-04-05 provisioning run): 10 direct deps + 89 transitive
+deps + pip + pip-audit = 101 packages. Venv size: 1.6 GB on disk. 375 MB RAM
 available after full install on 1 GB Pi.
 
 ---
@@ -121,6 +121,42 @@ print('ALSA hw:0,0 ok')
 - Linux-only. On Windows the codebase falls back to PyAudio automatically.
 - `hw:0,0` bypasses dmix — correct for the Pi where master.py is the sole audio
   consumer.
+
+---
+
+## pyaudio
+
+PortAudio Python bindings. **Input capture** for the recorder child: Pipecat’s
+local transport opens the microphone via PyAudio. This is separate from TTS
+output — on Linux, playback uses **pyalsaaudio** (above) because PortAudio’s
+output path tears on bcm2835; capture still goes through PyAudio/PortAudio.
+
+`pipecat-ai` does **not** list `pyaudio` as a pip dependency — it must be
+installed explicitly or imports fail at runtime.
+
+**Imported by:** Pipecat local audio stack (via `recorder_child.py` transport)
+
+### Install
+
+```bash
+# Build dependency — PyAudio compiles against PortAudio headers
+sudo apt install -y portaudio19-dev
+
+pip install pyaudio
+```
+
+### Verify
+
+```bash
+python -c "import pyaudio; print('pyaudio', pyaudio.__version__)"
+```
+
+### Notes
+
+- Builds from source on the Pi if no matching wheel (Python 3.13 / aarch64 may
+  build locally; allow ~30s).
+- Do not confuse with **pyalsaaudio**: both may be present — pyalsaaudio for ALSA
+  playback in `tts.py`, PyAudio for mic capture in the recorder pipeline.
 
 ---
 

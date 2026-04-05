@@ -19,6 +19,14 @@ INFO, WARNING, ERROR. Default: INFO.
   PERF  (8)  — duty cycle periodic reports; all DEBUG visible at this level
   DEBUG (10) — state transitions, stream ops, OWW/Silero resets
   INFO  (20) — wake/VAD events, transcripts, latencies, shutdown summaries
+
+Third-party stdlib loggers (after ``configure_logging()``):
+
+  ``cartesia`` and ``websockets`` default to **INFO**, so with ``LOG_LEVEL=DEBUG``
+  you still get forked_assistant DEBUG lines without every WebSocket frame
+  (Cartesia logs raw JSON including base64 ``data`` audio). Override with
+  ``CARTESIA_LOG_LEVEL`` / ``WEBSOCKETS_LOG_LEVEL`` (same names as ``logging``
+  levels: ``DEBUG``, ``INFO``, …) to troubleshoot the SDK or protocol.
 """
 
 import logging
@@ -106,3 +114,24 @@ def configure_logging(default_level: str = "INFO") -> None:
     # Route all stdlib logging into loguru. level=0 passes everything through;
     # filtering happens in the loguru sink above.
     logging.basicConfig(handlers=[_InterceptHandler()], level=0, force=True)
+    _apply_third_party_log_levels()
+
+
+def _apply_third_party_log_levels() -> None:
+    """Cap noisy stdlib loggers so LOG_LEVEL=DEBUG stays usable.
+
+    Libraries (Cartesia, websockets) log at DEBUG with huge payloads; we cannot
+    control their emit sites from forked_assistant. Per-logger levels apply
+    before records reach the intercept handler.
+    """
+
+    def _set(name: str, env_key: str, default: int) -> None:
+        raw = os.environ.get(env_key, "").strip().upper()
+        if raw:
+            level = getattr(logging, raw, default)
+        else:
+            level = default
+        logging.getLogger(name).setLevel(level)
+
+    _set("cartesia", "CARTESIA_LOG_LEVEL", logging.INFO)
+    _set("websockets", "WEBSOCKETS_LOG_LEVEL", logging.INFO)
