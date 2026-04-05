@@ -75,7 +75,8 @@ def _play_once(
     frames_per_buffer: int,
     device_idx: int | None,
     chunk_mode: bool,
-) -> None:
+) -> list[str]:
+    """Returns the summary lines printed in the trailing conditional for aggregation."""
     """Open a PyAudio stream, play pcm, print timing diagnostics, close."""
     bytes_per_frame = n_channels * sample_width
     duration_s = len(pcm) / (frame_rate * bytes_per_frame)
@@ -124,6 +125,16 @@ def _play_once(
                 stream.write(pcm)
                 write_times_ms.append((time.monotonic() - t0) * 1000)
 
+            # Drain wait: write() returns when data is queued into PortAudio's
+            # software buffer, not when the hardware has finished playing it.
+            # stop_stream() below will cut off any tail still in hardware DMA.
+            # Sleep for the remaining audio duration so the hardware catches up.
+            elapsed_s = time.monotonic() - t_start
+            remaining_s = duration_s - elapsed_s
+            if remaining_s > 0.01:
+                print(f"  drain wait: {remaining_s*1000:.0f}ms")
+                time.sleep(remaining_s)
+
         finally:
             stream.stop_stream()
             stream.close()
@@ -133,6 +144,13 @@ def _play_once(
 
     wall_ms = (time.monotonic() - t_start) * 1000
 
+    summary: list[str] = []
+
+    def _emit(line: str) -> None:
+        print(line)
+        summary.append(line)
+
+    header = f"frames_per_buffer={frames_per_buffer}"
     if chunk_mode:
         avg_ms = sum(write_times_ms) / len(write_times_ms)
         max_ms = max(write_times_ms)
@@ -140,24 +158,26 @@ def _play_once(
         # means the hardware buffer ran dry before the call returned —
         # a confirmed underrun event.
         slow = [t for t in write_times_ms if t > expected_chunk_ms * 2]
-        print(
-            f"  write() calls: {len(write_times_ms)}  "
+        _emit(
+            f"  [{header}]  write() calls: {len(write_times_ms)}  "
             f"avg: {avg_ms:.1f}ms  max: {max_ms:.1f}ms  "
             f"expected per chunk: {expected_chunk_ms:.1f}ms"
         )
         if slow:
-            print(
-                f"  *** {len(slow)} underrun candidate(s): "
+            _emit(
+                f"  [{header}]  *** {len(slow)} underrun candidate(s): "
                 f"{[f'{t:.0f}ms' for t in slow[:10]]} ***"
             )
         else:
-            print(f"  no slow writes detected (threshold: {expected_chunk_ms*2:.1f}ms)")
+            _emit(f"  [{header}]  no slow writes (threshold: {expected_chunk_ms*2:.1f}ms)")
     else:
-        print(
-            f"  single write(): {write_times_ms[0]:.0f}ms  "
+        _emit(
+            f"  [{header}]  single write(): {write_times_ms[0]:.0f}ms  "
             f"wall: {wall_ms:.0f}ms  "
             f"audio duration: {duration_s*1000:.0f}ms"
         )
+
+    return summary
 
 
 # ---------------------------------------------------------------------------
@@ -219,9 +239,10 @@ def main() -> None:
     print("The first clean playback identifies the fix candidate.")
     print("Ctrl+C to stop early.")
 
+    aggregate: list[str] = []
     for fpb in frames_list:
         try:
-            _play_once(
+            lines = _play_once(
                 pcm=pcm,
                 frame_rate=frame_rate,
                 n_channels=n_channels,
@@ -230,12 +251,19 @@ def main() -> None:
                 device_idx=args.device,
                 chunk_mode=args.chunk,
             )
+            aggregate.extend(lines)
         except KeyboardInterrupt:
-            print("\nStopped.")
-            return
+            print("\nStopped early.")
+            break
         time.sleep(args.pause)
 
-    print("\nSweep complete.")
+    print()
+    print("=" * 70)
+    print("Sweep summary")
+    print("=" * 70)
+    for line in aggregate:
+        print(line)
+    print("=" * 70)
 
 
 if __name__ == "__main__":

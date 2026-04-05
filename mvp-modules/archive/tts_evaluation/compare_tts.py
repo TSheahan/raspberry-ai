@@ -176,8 +176,15 @@ def _run_deepgram_sentence(
         _save_wav(save_path, audio, DEEPGRAM_SAMPLE_RATE)
 
     stream = _open_stream(pa, DEEPGRAM_SAMPLE_RATE)
+    t_play = time.monotonic()
     try:
         stream.write(audio)
+        # write() returns when data is queued, not when hardware finishes.
+        # Sleep for any remaining duration so stop_stream() doesn't cut the tail.
+        audio_duration_s = len(audio) / (DEEPGRAM_SAMPLE_RATE * 2)  # S16LE = 2 bytes/sample
+        remaining_s = audio_duration_s - (time.monotonic() - t_play)
+        if remaining_s > 0.01:
+            time.sleep(remaining_s)
     finally:
         stream.stop_stream()
         stream.close()
