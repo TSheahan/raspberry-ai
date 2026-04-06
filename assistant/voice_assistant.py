@@ -317,6 +317,7 @@ def master_loop(pipe, shm: SharedMemory, child: Process) -> None:
                     and state.stt_start_pending
                 ):
                     _arm_stt_session(state, ring_reader, dg_client)
+                    print("!! SPEAK !!", flush=True)
                 elif (
                     res.accepted
                     and state.phase == "capture"
