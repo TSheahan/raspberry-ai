@@ -105,6 +105,8 @@ echo 'voice ALL=(agent) NOPASSWD: /home/agent/.local/bin/agent' | \
 sudo chmod 440 /etc/sudoers.d/voice-assistant-agent
 ```
 
+**Wrapper interposition (optional):** To run a repo-tracked shim on `AGENT_BIN` instead of this path directly — narrow sudoers, install hooks, logging — follow `cursor-agent-wrapper-provisioning.md` and `mvp-modules/forked_assistant/spec/cursor_agent_wrapper_spec.md`. The raw CLI remains the supervised child inside the wrapper.
+
 ---
 
 ### 5a. Block Remote Login for Appliance Users

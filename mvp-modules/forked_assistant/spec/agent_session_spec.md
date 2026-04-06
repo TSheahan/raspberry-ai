@@ -110,6 +110,8 @@ Flag rationale:
 - `--trust`: trust workspace without interactive prompt (required for headless `-p` mode)
 - `--resume`: omitted on fresh start; included with captured `session_id` within the resume window
 
+**Security / argv:** The user utterance is sent on **stdin** (`transcript + "\n"`), not on the process argv. Command-line arguments are Cursor flags and paths only. Callers must **keep** that invariant if a future wrapper logs argv for diagnostics — see `cursor_agent_wrapper_spec.md` §6.
+
 ### stream-json Event Schema
 
 Three event types are consumed. All other types (`user` echo, tool calls, etc.) are ignored.
@@ -243,3 +245,5 @@ Other backends implement `AgentSession` with the same interface:
 | _(future)_ | Alternative model CLI | Same base, different binary |
 
 `master.py` only imports and instantiates the concrete class. Swapping backends is a one-line change in the master configuration block.
+
+**Deployment note:** On Pi, `AGENT_BIN` may point at a **wrapper** that supervises the real Cursor CLI; the argv contract in §Subprocess Invocation is unchanged. See `cursor_agent_wrapper_spec.md`.

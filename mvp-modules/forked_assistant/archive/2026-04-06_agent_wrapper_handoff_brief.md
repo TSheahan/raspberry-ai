@@ -20,11 +20,11 @@
 
 5. **Version control** — the wrapper **must be tracked in this repo** and **re-installed when it changes** (deterministic sync from checkout to runtime location).
 
-6. **New repo root folder** — add a **dedicated top-level directory** for **`voice` user artifacts** (sparse; the wrapper is the **first** member). Name is a design choice (e.g. `voice-artifacts/`); document layout and naming in the spec.
+6. **New repo root folder** — add a **dedicated top-level directory** for files **aligned with the `agent` user** (sparse; the wrapper is the **first** member). The checkout stays `voice`-bound; the folder name should reflect the **agent** link (see spec: `agent-artifacts/`).
 
 7. **`profiling-pi` install-time responsibility** — extend profiling instructions so an agent (or operator) performing install/provision must:
-   - **Install an update hook** on the **local checkout** of `raspberry-ai` (e.g. `post-merge` / `post-checkout` git hook, or another hook pattern — **design** the exact mechanism) so that when the repo updates, the voice-runtime copy of the wrapper is refreshed.
-   - **Profile a sudo permission** in the same **narrow** style as the existing `voice ALL=(agent) NOPASSWD: …` entry — but for whatever the **update hook** needs to **deposit** the wrapper into **`/home/voice/`** (or the chosen install path). Document the exact sudoers line(s) and rationale.
+   - **Install an update hook** on the **local checkout** of `raspberry-ai` (e.g. `post-merge` / `post-checkout` git hook, or another hook pattern — **design** the exact mechanism) so that when the repo updates, the **agent-side install** of the wrapper is refreshed.
+   - **Profile a sudo permission** in the same **narrow** style as the existing `voice ALL=(agent) NOPASSWD: …` entry — but for whatever the **update hook** needs to **deposit** the wrapper into **`/home/agent/artifacts/`** (or the chosen agent-home path). Document the exact sudoers line(s) and rationale.
    - **Run the first execution** of the wrapper install (bootstrap) as part of profiling so the Pi reaches target state in one documented flow.
 
 ---
@@ -46,9 +46,9 @@ The following reflected **pre-pull** understanding; **lines and behaviour may di
 
 ## Suggested deliverables for the fresh session
 
-1. **Design markdown** (path TBD in spec — e.g. under `mvp-modules/forked_assistant/spec/` or next to the wrapper in the new voice-artifacts tree): wrapper **behaviour**, **signal/propagate** model, **exec** vs **supervise** child, **logging** policy, **failure** modes, interaction with **`AGENT_BIN`** / `CursorAgentSession` argv assembly.
+1. **Design markdown** (path TBD in spec — e.g. under `mvp-modules/forked_assistant/spec/` or next to the wrapper in the `agent-artifacts/` tree): wrapper **behaviour**, **signal/propagate** model, **exec** vs **supervise** child, **logging** policy, **failure** modes, interaction with **`AGENT_BIN`** / `CursorAgentSession` argv assembly.
 
-2. **Repository layout** — document the new **root folder**, wrapper filename(s), and **install target** under `/home/voice/…`.
+2. **Repository layout** — document the new **root folder** (`agent-artifacts/`), wrapper filename(s), and **install target** under **`/home/agent/…`** (agent-aligned runtime copy).
 
 3. **`profiling-pi` delta spec** — new or extended markdown: Target state / Instructions / Verify for hook installation, sudoers for hook, first-run install; align with `profiling-pi/AGENTS.md` provisioning order table.
 
@@ -71,4 +71,4 @@ The following reflected **pre-pull** understanding; **lines and behaviour may di
 - This file does **not** define the final wrapper implementation.
 - It does **not** assume the aborted session’s partial plans survived the pull.
 
-When the fresh session completes, it may add a single line here pointing to the **canonical design doc** path for traceability.
+**Canonical design doc:** `mvp-modules/forked_assistant/spec/cursor_agent_wrapper_spec.md` (companion provisioning: `profiling-pi/cursor-agent-wrapper-provisioning.md`).

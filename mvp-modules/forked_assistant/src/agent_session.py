@@ -213,8 +213,9 @@ def _flush_sentences(buffer: str) -> tuple[list[str], str]:
 _DEFAULT_RESUME_WINDOW = float(os.environ.get("AGENT_RESUME_WINDOW_SECS", "300"))
 
 # When set, the agent subprocess is launched as this Linux user via
-# `sudo -u <AGENT_USER> -H --`. Requires a sudoers entry:
-#   voice ALL=(agent) NOPASSWD: /home/agent/.local/bin/agent
+# `sudo -u <AGENT_USER> -H --`. Requires a sudoers entry, e.g.:
+#   voice ALL=(agent) NOPASSWD: /home/agent/artifacts/cursor-agent-wrapper
+#   (or the raw CLI path if no wrapper)
 # Leave unset (default) to run the agent as the current process user.
 _AGENT_USER = os.environ.get("AGENT_USER", "")
 
@@ -231,8 +232,13 @@ class CursorAgentSession(AgentSession):
     stdin: receives the transcript + newline, then is closed.
     stdout: newline-delimited stream-json events.
 
+    **Argv vs transcript:** The STT transcript is written only to **stdin**, not appended to argv.
+    A supervising wrapper may log argv without expecting user prompts or secrets there — do not
+    move transcript text onto the command line.
+
     See spec/agent_session_spec.md for the full contract.
     See archive/2026-04-04_wrapped_cursor_agent_context.md for schema reference.
+    See spec/cursor_agent_wrapper_spec.md §6 for logging policy alignment.
     """
 
     def __init__(

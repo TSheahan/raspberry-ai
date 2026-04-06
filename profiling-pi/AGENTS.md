@@ -22,6 +22,7 @@ step 4 quickly is worth front-loading.
 2. **`pip-hardening.md`** — lock down pip/uv before installing further packages
 3. **`venv.md`** — install and verify each Python dependency
 4. **`agent-user-setup.md`** — dedicated `agent` user for Cursor CLI subprocess
+4b. **`cursor-agent-wrapper-provisioning.md`** — optional: wrapper on `AGENT_BIN` (repo `agent-artifacts/` → `/home/agent/artifacts/`, supervise mode per spec); includes **logging wanted-vs-current** table and logrotate follow-up
 5. **`priority-permissions.md`** — real-time scheduling for the recorder child
 6. **`piper-tts-setup.md`** — Piper ONNX model (archived — too resource-intensive)
 
