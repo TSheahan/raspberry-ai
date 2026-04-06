@@ -7,7 +7,12 @@ readonly LOG_FILE=/var/log/agent-wrapper.log
 readonly DEFAULT_REAL=/home/agent/.local/bin/agent
 REAL_BIN="${CURSOR_AGENT_REAL_BIN:-${AGENT_REAL_BIN:-$DEFAULT_REAL}}"
 
+# Heartbeat interval (seconds) while polling for child exit.
+readonly POLL_INTERVAL="${WRAPPER_POLL_INTERVAL:-5}"
+
 ts() { date +"%Y-%m-%dT%H:%M:%S%z"; }
+
+epoch_ms() { date +%s%3N; }
 
 log_line() {
   local line="$1"
@@ -21,6 +26,20 @@ log_event() {
   local event="$1"
   shift
   log_line "$(ts) event=${event} $*"
+}
+
+# Snapshot surviving processes in PGID $1. Output is a compact one-liner
+# suitable for a log field: "pid:state:etime:comm pid:state:etime:comm …"
+# Returns 1 (empty string) when the group has no living processes.
+pgid_snapshot() {
+  local pgid="$1"
+  local snap
+  snap="$(ps -o pid=,stat=,etime=,comm= --no-headers -g "$pgid" 2>/dev/null | awk '{printf "%s:%s:%s:%s ", $1,$2,$3,$4}')"
+  snap="${snap% }"
+  if [[ -z "$snap" ]]; then
+    return 1
+  fi
+  printf '%s' "$snap"
 }
 
 # Argv is flags/paths only; transcript is on stdin (CursorAgentSession). Cap length for logs.
@@ -60,25 +79,79 @@ main() {
   local child=$!
   exec 3<&-
 
+  local spawn_ms
+  spawn_ms="$(epoch_ms)"
+
   log_event spawn_real "child_pid=${child} real_bin=${REAL_BIN}"
+
+  local signal_sent=false
 
   forward_signal() {
     local name="$1"
     log_event signal_forward "sig=${name} kill_target=-${child}"
-    # INT and TERM both send TERM to the group so the CLI can exit cleanly
-    # (same signal as a typical service stop).
     kill -TERM -- -"${child}" 2>/dev/null || true
+    signal_sent=true
+    local snap
+    if snap="$(pgid_snapshot "$child")"; then
+      log_event signal_pgid_after "pgid=${child} procs=${snap}"
+    else
+      log_event signal_pgid_after "pgid=${child} procs=none"
+    fi
   }
 
   # child is assigned before traps are installed; no empty-PGID forward in normal runs.
   trap 'forward_signal TERM' TERM
   trap 'forward_signal INT'  INT
 
+  # Poll loop: wait in POLL_INTERVAL-second bursts so we can emit
+  # periodic heartbeats with process-group state while the child runs.
   local wait_status=0
-  wait "$child" || wait_status=$?
+  local child_alive=true
+  local heartbeat_count=0
+
+  while $child_alive; do
+    # `wait -n` is not available in bash 4; use `kill -0` + sleep polling.
+    if ! kill -0 "$child" 2>/dev/null; then
+      # Child already exited; collect its status.
+      wait "$child" || wait_status=$?
+      child_alive=false
+    else
+      sleep "$POLL_INTERVAL" &
+      local sleep_pid=$!
+      # wait on sleep; if a signal interrupts, the trap fires and we re-loop.
+      wait "$sleep_pid" 2>/dev/null || true
+      # Re-check after sleep.
+      if ! kill -0 "$child" 2>/dev/null; then
+        wait "$child" || wait_status=$?
+        child_alive=false
+      else
+        heartbeat_count=$((heartbeat_count + 1))
+        local elapsed_ms=$(( $(epoch_ms) - spawn_ms ))
+        local snap
+        if snap="$(pgid_snapshot "$child")"; then
+          log_event heartbeat "seq=${heartbeat_count} elapsed_ms=${elapsed_ms} child_pid=${child} pgid_procs=${snap}"
+        else
+          log_event heartbeat "seq=${heartbeat_count} elapsed_ms=${elapsed_ms} child_pid=${child} pgid_procs=none"
+        fi
+      fi
+    fi
+  done
 
   trap - TERM INT
-  log_event exit "child_exit=${wait_status}"
+
+  local exit_ms
+  exit_ms="$(epoch_ms)"
+  local duration_ms=$(( exit_ms - spawn_ms ))
+
+  # Snapshot the process group after the leader exits — any remaining
+  # processes here are orphans that will be reparented to init.
+  local snap
+  if snap="$(pgid_snapshot "$child")"; then
+    log_event exit "child_exit=${wait_status} duration_ms=${duration_ms} signal_sent=${signal_sent} orphan_procs=${snap}"
+  else
+    log_event exit "child_exit=${wait_status} duration_ms=${duration_ms} signal_sent=${signal_sent} orphan_procs=none"
+  fi
+
   exit "$wait_status"
 }
 
