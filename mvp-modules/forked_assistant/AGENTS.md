@@ -25,6 +25,7 @@ forked_assistant/
 │   ├── recorder_state_spec.md     ← recorder state machine: DORMANT/WAKE_LISTEN/CAPTURE
 │   ├── stub_contracts.md          ← EU-3 parallel tracks: stub vs real IPC
 │   ├── agent_session_spec.md      ← EU-6: AgentSession abstract interface + CursorAgentSession contract
+│   ├── cursor_agent_wrapper_spec.md ← Cursor CLI shim: logging, sudo path, hooks (design)
 │   └── implementation_framework.md ← EU phasing, session principles, dependency graph (READ FIRST)
 ├── src/               ← library code (see src/AGENTS.md for index + agent shutdown analysis)
 │   ├── AGENTS.md                 ← file index; Cursor agent subprocess shutdown notes
@@ -77,7 +78,7 @@ These are proven failure modes. Do not relax them:
 
 ## Agent Subprocess — Privilege Separation
 
-The Cursor CLI subprocess runs as a dedicated `agent` Linux user via `sudo -u agent -H`. The voice assistant processes (`master.py`, recorder child) run as `user`. The sudoers entry is narrow: `user ALL=(agent) NOPASSWD: /home/agent/.local/bin/agent`.
+The Cursor CLI subprocess runs as a dedicated `agent` Linux user via `sudo -u agent -H`. The voice assistant processes (`master.py`, recorder child) run as `user`. The sudoers entry is a single fixed path: on Pi prefer the supervising wrapper at `/home/agent/artifacts/cursor-agent-wrapper` (see `profiling-pi/cursor-agent-wrapper-provisioning.md`); otherwise the raw CLI path `/home/agent/.local/bin/agent`.
 
 Set `AGENT_USER=agent` in `.env` to enable. Leave unset for dev/local runs (subprocess inherits current user). `AGENT_BIN` and `AGENT_WORKSPACE` must point to `agent`'s home when `AGENT_USER` is active.
 

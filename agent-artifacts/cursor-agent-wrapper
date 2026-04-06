@@ -1,0 +1,77 @@
+#!/usr/bin/env bash
+# Supervising launcher for the Cursor CLI (agent user). Spec:
+# mvp-modules/forked_assistant/spec/cursor_agent_wrapper_spec.md
+set -uo pipefail
+
+readonly LOG_FILE=/var/log/agent-wrapper.log
+readonly DEFAULT_REAL=/home/agent/.local/bin/agent
+REAL_BIN="${CURSOR_AGENT_REAL_BIN:-${AGENT_REAL_BIN:-$DEFAULT_REAL}}"
+
+ts() { date -u +"%Y-%m-%dT%H:%M:%SZ"; }
+
+log_line() {
+  local line="$1"
+  if echo "$line" >>"$LOG_FILE" 2>/dev/null; then
+    return 0
+  fi
+  echo "$line" >&2
+}
+
+log_event() {
+  local event="$1"
+  shift
+  log_line "$(ts) event=${event} $*"
+}
+
+# Argv is flags/paths only; transcript is on stdin (CursorAgentSession). Cap length for logs.
+argv_summary() {
+  local combined="" a
+  for a in "$@"; do
+    combined+="${combined:+ }${a}"
+  done
+  local max=900
+  if ((${#combined} > max)); then
+    printf '%s...(truncated %d chars)' "${combined:0:max}" "$((${#combined} - max))"
+  else
+    printf '%s' "$combined"
+  fi
+}
+
+main() {
+  local sum
+  sum="$(argv_summary "$@")"
+  sum="${sum//$'\n'/\\n}"
+  log_event start "resolved_real=${REAL_BIN} argv_summary=${sum}"
+
+  if [[ ! -x "$REAL_BIN" ]]; then
+    log_event fatal "missing_or_not_executable path=${REAL_BIN}"
+    exit 127
+  fi
+
+  if ! command -v setsid >/dev/null 2>&1; then
+    log_event fatal "setsid_not_found"
+    exit 126
+  fi
+
+  local child
+  setsid -- "$REAL_BIN" "$@" &
+  child=$!
+  log_event spawn_real "child_pid=${child} real_bin=${REAL_BIN}"
+
+  forward_signal() {
+    local name="$1"
+    log_event signal_forward "sig=${name} kill_target_pgid=-${child}"
+    kill -TERM -- -"${child}" 2>/dev/null || true
+  }
+
+  trap 'forward_signal TERM' TERM
+  trap 'forward_signal INT' INT
+
+  local wait_status=0
+  wait "$child" || wait_status=$?
+
+  trap - TERM INT
+  exit "$wait_status"
+}
+
+main "$@"
