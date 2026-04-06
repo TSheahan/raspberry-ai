@@ -140,7 +140,7 @@ Suppress `push_frame` inside `audio_writer` when the monitor signals pressure. A
 gets written (audio_writer runs before suppression), only VAD/OWW inference is starved.
 
 Strictly better than Option A — ring buffer writes are preserved. But requires a pipeline
-restructure, and suppression logic in AudioFrameWriter is an awkward fit for that class's
+restructure, and suppression logic in AudioShmRingWriteProcessor is an awkward fit for that class's
 responsibilities.
 
 ### Option C: Signal processors to skip inference (recommended)

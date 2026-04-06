@@ -76,8 +76,8 @@ def read_header(shm: SharedMemory) -> dict:
 # Writer (recorder child)
 # ---------------------------------------------------------------------------
 
-class RingBufferWriter:
-    """Write audio frames into the ring buffer. Single writer only."""
+class AudioShmRingWriter:
+    """Write audio frames into the shared-memory ring. Single writer only."""
 
     def __init__(self, shm: SharedMemory) -> None:
         self._shm = shm
@@ -109,8 +109,8 @@ class RingBufferWriter:
 # Reader (master)
 # ---------------------------------------------------------------------------
 
-class RingBufferReader:
-    """Read spans of audio from the ring buffer. Single reader."""
+class AudioShmRingReader:
+    """Read spans of audio from the shared-memory ring. Single reader."""
 
     def __init__(self, shm: SharedMemory) -> None:
         self._shm = shm

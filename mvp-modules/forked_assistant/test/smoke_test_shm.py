@@ -4,7 +4,7 @@ EU-1 + EU-2: SharedMemory and Ring Buffer Smoke Tests
 EU-1 — Proves SharedMemory works across a fork on ARM64 Linux with this
         Python build, and that aligned uint64 reads are coherent without locks.
 
-EU-2 — Proves audio_shm_ring.RingBufferWriter / RingBufferReader work correctly:
+EU-2 — Proves audio_shm_ring.AudioShmRingWriter / AudioShmRingReader work correctly:
         IPC test (fork): child writes audio-sized frames, master reads span.
         Wrap test (in-process): write past ring boundary, verify wrap-around
         and stale detection.
@@ -20,7 +20,7 @@ from multiprocessing.shared_memory import SharedMemory
 
 from audio_shm_ring import (
     FRAME_BYTES, RING_SIZE, SHM_SIZE, SAMPLE_RATE, SAMPLE_WIDTH,
-    RingBufferWriter, RingBufferReader, read_header,
+    AudioShmRingWriter, AudioShmRingReader, read_header,
 )
 
 # ---------------------------------------------------------------------------
@@ -86,7 +86,7 @@ _N_FRAMES     = 50           # frames to write (~1 second of audio)
 
 def _eu2_child(shm_name: str) -> None:
     shm = SharedMemory(name=shm_name, create=False)
-    writer = RingBufferWriter(shm)
+    writer = AudioShmRingWriter(shm)
     try:
         for i in range(_N_FRAMES):
             # Each frame: byte value = i % 256, repeated FRAME_BYTES times
@@ -102,7 +102,7 @@ def test_eu2_ipc() -> None:
     child.start()
     print(f"[EU-2a] child pid={child.pid}")
 
-    reader    = RingBufferReader(shm)
+    reader    = AudioShmRingReader(shm)
     expected  = _N_FRAMES * FRAME_BYTES
     deadline  = time.monotonic() + 5.0
     while reader.write_pos < expected:
@@ -143,8 +143,8 @@ _EU2B_SHM_NAME = "eu2_wrap"
 
 def test_eu2_wrap() -> None:
     shm    = SharedMemory(name=_EU2B_SHM_NAME, create=True, size=SHM_SIZE)
-    writer = RingBufferWriter(shm)
-    reader = RingBufferReader(shm)
+    writer = AudioShmRingWriter(shm)
+    reader = AudioShmRingReader(shm)
 
     # Write enough frames to wrap the ring: RING_SIZE // FRAME_BYTES + 2
     frames_to_fill = RING_SIZE // FRAME_BYTES + 2

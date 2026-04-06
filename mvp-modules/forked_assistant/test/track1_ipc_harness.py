@@ -28,7 +28,7 @@ from recorder_state import RecorderState
 from audio_shm_ring import (
     FRAME_BYTES, FRAME_DURATION, SAMPLE_RATE, SAMPLE_WIDTH,
     SHM_NAME, SHM_SIZE,
-    RingBufferReader, RingBufferWriter,
+    AudioShmRingReader, AudioShmRingWriter,
 )
 
 
@@ -44,8 +44,8 @@ class RecorderTrack1(RecorderState):
     has no PyAudio or ONNX.
     """
 
-    def __init__(self, pipe, ring_writer: RingBufferWriter):
-        # shm strong-ref not needed here; RingBufferWriter owns it
+    def __init__(self, pipe, ring_writer: AudioShmRingWriter):
+        # shm strong-ref not needed here; AudioShmRingWriter owns it
         super().__init__(pipe=pipe, shm=None)
         self._ring_writer = ring_writer
 
@@ -181,7 +181,7 @@ async def command_listener(state: RecorderTrack1, pipe) -> None:
 async def recorder_child_main(pipe, shm_name: str) -> None:
     shm = SharedMemory(name=shm_name, create=False)
     try:
-        ring_writer = RingBufferWriter(shm)
+        ring_writer = AudioShmRingWriter(shm)
         state = RecorderTrack1(pipe=pipe, ring_writer=ring_writer)
 
         pipe.send({"cmd": "READY"})
@@ -211,7 +211,7 @@ def recorder_child_entry(pipe, shm_name: str) -> None:
 
 def master_loop(parent_conn, shm: SharedMemory, child: Process) -> None:
     """Synchronous master event loop. Runs 3 wake→capture→VAD cycles."""
-    ring_reader = RingBufferReader(shm)
+    ring_reader = AudioShmRingReader(shm)
     cycles = 0
     vad_start_pos = 0
 

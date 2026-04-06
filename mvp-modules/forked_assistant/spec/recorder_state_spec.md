@@ -90,7 +90,7 @@ class RecorderState:
     _vad_ref: weakref               # → GatedVADProcessor
     _oww_ref: weakref               # → OpenWakeWordProcessor
     _transport_ref: object          # → input_transport (strong ref, long-lived)
-    _ring_writer_ref: weakref       # → RingBufferWriter processor
+    _ring_writer_ref: weakref       # → AudioShmRingWriteProcessor
     _pipe: Connection               # pipe back to master (strong ref)
     _shm: SharedMemory              # shared memory segment (strong ref)
 ```
@@ -169,16 +169,16 @@ def signal_vad_stopped(self):
 transport.input()
     → GatedVADProcessor      # Silero ONNX — only in CAPTURE state
     → OpenWakeWordProcessor   # OWW ONNX — only in WAKE_LISTEN state
-    → RingBufferWriter        # writes all audio frames to shared memory
+    → AudioShmRingWriteProcessor   # writes all audio frames to shared memory
 ```
 
-### RingBufferWriter (new processor)
+### AudioShmRingWriteProcessor (new processor)
 
 Replaces `UtteranceCapturer` in the recorder child. Minimal responsibility:
 
 ```python
-class RingBufferWriter(FrameProcessor):
-    """Writes audio frames to the shared ring buffer."""
+class AudioShmRingWriteProcessor(FrameProcessor):
+    """Writes audio frames to the shared ring buffer via RecorderState."""
     
     def __init__(self, state: RecorderState):
         super().__init__()

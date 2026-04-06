@@ -73,7 +73,7 @@ These are called from Pipecat processor event handlers. They are synchronous (no
 state.write_audio(frame_bytes: bytes) → None
 ```
 
-Called from `RingBufferWriter.process_frame` on every `AudioRawFrame` when not dormant. Synchronous. Must complete in under 1ms (it is called on the asyncio event loop during frame processing).
+Called from `AudioShmRingWriteProcessor.process_frame` on every `AudioRawFrame` when not dormant. Synchronous. Must complete in under 1ms (it is called on the asyncio event loop during frame processing).
 
 ### Frame counters
 
@@ -265,7 +265,7 @@ async def main():
     transport = LocalAudioTransport(...)
     vad_processor = GatedVADProcessor(vad_analyzer=SileroVADAnalyzer(...), state=state)
     wake_processor = OpenWakeWordProcessor(state=state)
-    ring_writer = RingBufferWriter(state=state)
+    ring_writer = AudioShmRingWriteProcessor(state=state)
     
     state.set_transport(transport.input())
     state.set_vad(vad_processor)
@@ -309,7 +309,7 @@ async def direct_command_driver(state: RecorderStateStub):
 - Pipecat pipeline survives inside future forked child (single-process is sufficient for logic correctness)
 - `GatedVADProcessor` (adapted from v10a) works with `RecorderState` as its state interface
 - `OpenWakeWordProcessor` (adapted from v10a) works with `RecorderState`
-- `RingBufferWriter` calls `write_audio()` on every audio frame when not dormant (observed via stub counter if desired)
+- `AudioShmRingWriteProcessor` calls `write_audio()` on every audio frame when not dormant (observed via stub counter if desired)
 - State machine transitions fire correct side effects: OWW full reset on CAPTURE→WAKE_LISTEN, Silero reset on →CAPTURE
 - VAD event handlers emit correct signals: `signal_vad_started`, `signal_vad_stopped`
 - OWW detection emits `signal_wake_detected`
@@ -326,7 +326,7 @@ The merge session replaces `RecorderStateStub` with `RecorderState` in Track 2's
 1. `RecorderState.__init__` accepts `pipe: Connection` and `shm: SharedMemory` (passed in by master after fork)
 2. `RecorderState` constructor signature is compatible: `RecorderStateStub.__init__` calls `super().__init__(pipe=None, shm=None)` — verify real `RecorderState` handles `None` gracefully during construction (set at `state.set_pipe()` / `state.set_shm()` after fork, before READY)
 3. All signal emission methods in real `RecorderState` produce the exact dict formats specified in `interface_spec.md`
-4. `write_audio()` in real `RecorderState` calls `ring_buffer.RingBufferWriter.write(frame_bytes)` — uses EU-2 module
+4. `write_audio()` in real `RecorderState` calls `audio_shm_ring.AudioShmRingWriter.write(frame_bytes)` — uses EU-2 module
 5. `state.write_pos` returns the ring buffer's current `write_pos` — included in signal dicts
 
 Merge is complete when Track 2's full Pipecat pipeline runs with real `RecorderState`, inside a forked child, with a Track-1-style master reading the ring buffer and printing captured spans. That is the `test_harness.py` target.
@@ -337,4 +337,4 @@ Merge is complete when Track 2's full Pipecat pipeline runs with real `RecorderS
 
 Track 2 stubs `write_audio()` to a no-op. `state.write_pos` increments (monotonically) but nothing is written to any buffer. The ring buffer is entirely Track 1's concern. There is no in-process SharedMemory in Track 2.
 
-This is intentional. The ring buffer module (`ring_buffer.py` from EU-2) is imported by Track 1 and by the merged `recorder_child.py`. Track 2 imports neither.
+This is intentional. The ring buffer module (`assistant/audio_shm_ring.py` from EU-2) is imported by Track 1 and by the merged `assistant/recorder_process.py`. Track 2 imports neither.

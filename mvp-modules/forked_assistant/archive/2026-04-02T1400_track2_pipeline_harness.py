@@ -180,10 +180,10 @@ class OpenWakeWordProcessor(FrameProcessor):
 
 
 # ---------------------------------------------------------------------------
-# RingBufferWriter — writes audio frames via state.write_audio()
+# AudioShmRingWriteProcessor — writes audio frames via state.write_audio()
 # ---------------------------------------------------------------------------
 
-class RingBufferWriter(FrameProcessor):
+class AudioShmRingWriteProcessor(FrameProcessor):
     """Writes audio frames to the ring buffer via state.write_audio().
     In Track 2 this is a no-op (RecorderStateStub discards writes).
     """
@@ -251,7 +251,7 @@ async def main():
     )
 
     wake_processor = OpenWakeWordProcessor(state=state)
-    ring_writer = RingBufferWriter(state=state)
+    ring_writer = AudioShmRingWriteProcessor(state=state)
 
     input_transport = transport.input()
 

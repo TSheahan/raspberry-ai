@@ -63,10 +63,10 @@ Implementation is ordered to prove the riskiest components first and build incre
 
 **Goal:** Implement the ring buffer read/write primitives as a standalone module.
 
-**Deliverable:** `src/ring_buffer.py` containing:
+**Deliverable:** `assistant/audio_shm_ring.py` containing:
 - Constants: `HEADER_SIZE`, `RING_SIZE`, `SHM_SIZE`, `SHM_NAME`, audio format constants
-- `RingBufferWriter` class: init from SharedMemory, `write(frame_bytes)`, `write_pos` property
-- `RingBufferReader` class: init from SharedMemory, `read(start_pos, end_pos)` → bytes, staleness check
+- `AudioShmRingWriter` class: init from SharedMemory, `write(frame_bytes)`, `write_pos` property
+- `AudioShmRingReader` class: init from SharedMemory, `read(start_pos, end_pos)` → bytes, staleness check
 - Header pack/unpack utilities
 
 **Test:** Extend the EU-1 smoke test to use the ring buffer module — child writes audio-sized frames, master reads spans.
@@ -123,11 +123,11 @@ See `stub_contracts.md` — Track 1 Spec for the full `FakeAudioDriver` implemen
 
 #### EU-3c: Track 2 — Pipecat Pipeline Harness (parallel)
 
-**Goal:** Prove the Pipecat pipeline adaptation: `GatedVADProcessor` and `OpenWakeWordProcessor` modified for `RecorderState`, `RingBufferWriter`, state transitions, and stream lifecycle. No fork. No SharedMemory. No Pipe.
+**Goal:** Prove the Pipecat pipeline adaptation: `GatedVADProcessor` and `OpenWakeWordProcessor` modified for `RecorderState`, `AudioShmRingWriteProcessor`, state transitions, and stream lifecycle. No fork. No SharedMemory. No Pipe.
 
 **Deliverable:** `test/track2_pipeline_harness.py` — a single-process script:
 - Uses `RecorderStateStub` (subclasses EU-3a's `RecorderState`, overrides downstream port to collect events)
-- Full Pipecat pipeline: `transport.input() → GatedVADProcessor → OpenWakeWordProcessor → RingBufferWriter`
+- Full Pipecat pipeline: `transport.input() → GatedVADProcessor → OpenWakeWordProcessor → AudioShmRingWriteProcessor`
 - `direct_command_driver` coroutine monitors `state.events` and calls `state.set_phase()` directly
 
 See `stub_contracts.md` — Track 2 Spec for `RecorderStateStub` implementation and command driver pattern.
@@ -173,7 +173,7 @@ Duty cycle measurement revealed OWW `model.predict()` blocked the event loop for
 **Merge checklist** (from `stub_contracts.md` — EU-3d Merge Contract):
 1. Verify `RecorderState.__init__(pipe=None, shm=None)` sets deferred — real values injected before READY
 2. Verify all signal emission methods produce dicts matching `interface_spec.md` exactly
-3. Verify `write_audio()` delegates to `ring_buffer.RingBufferWriter`
+3. Verify `write_audio()` delegates to `audio_shm_ring.AudioShmRingWriter`
 4. Verify `state.write_pos` is included in signal payloads
 
 **Success criteria (full EU-3):**
@@ -297,7 +297,7 @@ Remaining validation before step 7 closes: (1) confirm Claude response text prin
 **Code written (2026-04-04):** `src/master.py` rewritten with EU-5 streaming and EU-6 agent wiring integrated. Key implementation notes:
 - `EventType` imported from `deepgram.core.events` (SDK v6 path, confirmed from official docs).
 - `on_message` callback checks `message.type == "Results"` and `message.is_final` before accumulating.
-- `_CaptureSession` class encapsulates transcript accumulator + stop_event + thread handle.
+- `_SttCaptureSession` class encapsulates transcript accumulator + stop_event + thread handle.
 - Ring tail runs in a `threading.Thread` (daemon). On `VAD_STOPPED`, `stop_event.set()` → `thread.join(timeout=5)` → `send_finalize()` → `send_close_stream()` inside the context manager.
 - `agent.prepare()` called synchronously on `WAKE_DETECTED` (Popen is non-blocking; returns immediately).
 - `cognitive_loop(transcript, agent)` replaces the old `cognitive_loop(audio_bytes, dg_client)`. Prints text chunks from `agent.run()` incrementally.
@@ -396,13 +396,13 @@ stdin receives the transcript; stdout is a stream of newline-delimited JSON even
 
 After EU-6 is confirmed on Pi and all step 7 completion criteria are checked, perform the following before starting step 8:
 
-**Deliverable refactor:** The four platform files are the step 7 delivery artifact:
-- `src/ring_buffer.py`
-- `src/recorder_state.py`
-- `src/recorder_child.py`
-- `src/master.py`
+**Deliverable refactor:** The core runtime modules under repo-root `assistant/` are the step 7 delivery artifact (ring buffer + recorder + master loop):
+- `assistant/audio_shm_ring.py` — EU-2 SharedMemory ring (`AudioShmRingWriter` / `AudioShmRingReader`)
+- `assistant/recorder_state.py`
+- `assistant/recorder_process.py` — merged recorder child (`RingBackedRecorderState`, Pipecat pipeline)
+- `assistant/voice_assistant.py` — master / cognitive loop (EU-4…EU-7)
 
-Copy or move these from `forked_assistant/src/` to `mvp-modules/deliverables/step7/`. This mirrors the pattern established in `mvp-modules/deliverables/` for prior steps and marks `forked_assistant/` as a concluded development effort.
+Copy or snapshot these together with the rest of `assistant/` (`agent_session.py`, `tts_backends.py`, `logging_setup.py`, …) into `mvp-modules/deliverables/step7/` as needed for a reproducible tree. This mirrors the pattern established in `mvp-modules/deliverables/` for prior steps and marks `forked_assistant/` as a concluded development effort.
 
 **Markdown updates at delivery boundary:**
 - `mvp-modules/starting_brief.md` — record step 7 complete, note the two-process architecture as the delivery mechanism, summarise latency observations from EU-5/EU-6 runs
@@ -411,7 +411,7 @@ Copy or move these from `forked_assistant/src/` to `mvp-modules/deliverables/ste
 - `memory/architecture_decisions.md` and `memory/shutdown_and_buffer_patterns.md` — any remaining session findings
 - `mvp-modules/INDEX.md` — add step 7 deliverables entry if the index tracks deliverables
 
-**Scope note:** `forked_assistant/spec/`, `test/`, and `archive/` remain in place as the development record. Only `src/` is promoted to `deliverables/`. The specs are the supporting documentation for the delivered code and should be cross-referenced from the deliverables entry.
+**Scope note:** `forked_assistant/spec/`, `test/`, and `archive/` remain in place as the development record. Only the runtime sources under repo-root `assistant/` are promoted to `deliverables/` (not the spec tree). The specs are the supporting documentation for the delivered code and should be cross-referenced from the deliverables entry.
 
 ---
 
@@ -467,7 +467,7 @@ EU-3b (Track 1:        EU-3c (Track 2:        ← parallel
   │                      │
   └──────────┬───────────┘
              ▼
-           EU-3d (Merge → recorder_child.py + test_harness.py)
+           EU-3d (Merge → recorder_process.py + test_harness.py)
              │
              ▼
            EU-4 (Master process — batch mode)  ← complete
@@ -480,12 +480,12 @@ EU-3b (Track 1:        EU-3c (Track 2:        ← parallel
              │                         EU-6 (Agent module — AgentSession + CursorAgentSession)
              │                         │  src/agent_session.py written; Pi integration in EU-5 session
              ▼                         ┘
-        master.py restructure (EU-5 + EU-6 Pi session — cognitive loop wiring)
+        voice_assistant.py restructure (EU-5 + EU-6 Pi session — cognitive loop wiring)
              │
              ▼
         *** Step 7 complete — forked_assistant/ closes ***
              │
-             ├── Delivery packaging: src/ → mvp-modules/deliverables/step7/
+             ├── Delivery packaging: assistant/ → mvp-modules/deliverables/step7/
              ├── starting_brief.md step 7 marked complete
              │
              ▼
@@ -506,6 +506,14 @@ Step 8 (TTS audio output) is partially delivered — `PiperTTS` proven as a pipe
 ## File Layout
 
 ```
+assistant/                       ← repo-root runtime (master + recorder child)
+  audio_shm_ring.py              ← EU-2 SharedMemory ring
+  recorder_state.py              ← EU-3a  (RecorderState base class)
+  recorder_process.py            ← EU-3d  (recorder subprocess + Pipecat pipeline)
+  voice_assistant.py             ← EU-4/EU-5/EU-6/EU-7 (streaming STT + agent + TTS)
+  agent_session.py               ← EU-6   (AgentSession + CursorAgentSession)
+  tts_backends.py                ← EU-7   (TTSBackend implementations)
+  logging_setup.py               ← shared loguru / stdlib routing
 forked_assistant/
   spec/
     architecture.md              ← design rationale and consolidated learnings
@@ -513,13 +521,6 @@ forked_assistant/
     recorder_state_spec.md       ← recorder child state machine, RecorderState object
     stub_contracts.md            ← EU-3 parallel track seam: method signatures, stub specs
     implementation_framework.md  ← this file (effort units, ordering, guidance)
-  src/
-    ring_buffer.py               ← EU-2
-    recorder_state.py            ← EU-3a  (RecorderState base class)
-    recorder_child.py            ← EU-3d  (merged, permanent)
-    agent_session.py             ← EU-6   (AgentSession base + CursorAgentSession; proven 2026-04-04)
-    tts.py                       ← EU-7   (PiperTTS; reference impl — replace before step 9)
-    master.py                    ← EU-4/EU-5/EU-6/EU-7 (streaming STT + agent + TTS; proven 2026-04-04)
   test/
     smoke_test_shm.py            ← EU-1
     track1_ipc_harness.py        ← EU-3b  (throwaway after merge)

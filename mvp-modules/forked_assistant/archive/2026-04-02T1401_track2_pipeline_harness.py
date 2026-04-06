@@ -353,10 +353,10 @@ class OpenWakeWordProcessor(FrameProcessor):
 
 
 # ---------------------------------------------------------------------------
-# RingBufferWriter — writes audio frames via state.write_audio()
+# AudioShmRingWriteProcessor — writes audio frames via state.write_audio()
 # ---------------------------------------------------------------------------
 
-class RingBufferWriter(FrameProcessor):
+class AudioShmRingWriteProcessor(FrameProcessor):
     """Writes audio frames to the ring buffer via state.write_audio().
 
     In Track 2 this writes to the InProcessRingBuffer inside RecorderStateStub,
@@ -366,7 +366,7 @@ class RingBufferWriter(FrameProcessor):
     def __init__(self, state: RecorderState):
         super().__init__()
         self.state = state
-        self._timer = FrameTimer("RingBufferWriter")
+        self._timer = FrameTimer("AudioShmRingWriteProcessor")
 
     async def process_frame(self, frame: Frame, direction):
         await super().process_frame(frame, direction)
@@ -388,7 +388,7 @@ class RingBufferWriter(FrameProcessor):
 async def direct_command_driver(state: RecorderStateStub,
                                  vad_proc: GatedVADProcessor,
                                  oww_proc: OpenWakeWordProcessor,
-                                 ring_writer: RingBufferWriter):
+                                 ring_writer: AudioShmRingWriteProcessor):
     """Drive state transitions without a pipe — simulates master commands."""
     await asyncio.sleep(1.0)
     print("[HARNESS] Setting phase to wake_listen")
@@ -446,7 +446,7 @@ async def main():
     )
 
     wake_processor = OpenWakeWordProcessor(state=state)
-    ring_writer = RingBufferWriter(state=state)
+    ring_writer = AudioShmRingWriteProcessor(state=state)
 
     input_transport = transport.input()
 

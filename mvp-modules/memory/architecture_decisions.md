@@ -209,7 +209,7 @@ wake_listen → (WAKE_DETECTED) → capture → (VAD_STOPPED) → idle → (cogn
 
 **Protocol:** Master sends `SET_IDLE` immediately on `VAD_STOPPED` (before reading ring buffer or starting STT). Master sends `SET_WAKE_LISTEN` in a `finally` block after `cognitive_loop()` returns — ensures transition happens even on exception.
 
-**Gating mechanism:** No new processor logic required. OWW already gates on `state.wake_listen` (False during idle). Silero already gates on `state.capture` (False during idle). AudioFrameWriter already gates on `not state.dormant` (idle is not dormant — writes continue).
+**Gating mechanism:** No new processor logic required. OWW already gates on `state.wake_listen` (False during idle). Silero already gates on `state.capture` (False during idle). `AudioShmRingWriteProcessor` already gates on `not state.dormant` (idle is not dormant — writes continue).
 
 **Confirmed (2026-04-03):** Cognitive loop duty cycle max: 3.0ms (vs 49.6ms before).
 

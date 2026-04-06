@@ -170,9 +170,9 @@ Step 10 is verified: on a confirmed-clean run, `[child] SHUTDOWN_FINISHED sent` 
 
 | File | Lines | Role | Reading guidance |
 |---|---|---|---|
-| `recorder_child.py` | 836 | Central. Transport init, all monkey-patches, processors (GatedVAD, OWW, AudioFrameWriter), shutdown sequence, `os._exit(0)`. | Primary source. Driver-interface-relevant code is concentrated in lines 639–835 (transport setup through entry point). The processor classes (lines 340–600) are context for understanding what runs during the stream's lifetime. |
+| `recorder_child.py` | 836 | Central. Transport init, all monkey-patches, processors (GatedVAD, OWW, AudioShmRingWriteProcessor), shutdown sequence, `os._exit(0)`. | Primary source. Driver-interface-relevant code is concentrated in lines 639–835 (transport setup through entry point). The processor classes (lines 340–600) are context for understanding what runs during the stream's lifetime. |
 | `recorder_state.py` | 317 | State machine and stream lifecycle methods. Processors hold weakrefs into this object; it owns `_start_stream` / `_stop_stream`. | `_start_stream` and `_stop_stream` (lines 200–236) are directly relevant — they implement the paComplete flag mechanism. The rest is state machine wiring and OWW/Silero reset logic, useful for understanding phase transitions but not the driver interface directly. |
-| `ring_buffer.py` | 147 | SharedMemory ring buffer for audio transfer to master. No ALSA interaction. | Read only if tracing `write_pos` signal payloads in the shutdown sequence matters for reconstructing the crash timeline. Otherwise not relevant. |
+| `audio_shm_ring.py` | (see `assistant/`) | SharedMemory ring buffer for audio transfer to master. No ALSA interaction. | Read only if tracing `write_pos` signal payloads in the shutdown sequence matters for reconstructing the crash timeline. Otherwise not relevant. |
 | `master.py` | 359 | Master process: pipe protocol, STT (Deepgram), Claude subprocess. No PyAudio, no ALSA. | Not relevant to driver analysis. Useful if understanding the master's role in the crash scenario (e.g., timing between SET_IDLE and Ctrl+C) adds context. |
 | `log_config.py` | ~50 | Logging setup only. | Skip. |
 

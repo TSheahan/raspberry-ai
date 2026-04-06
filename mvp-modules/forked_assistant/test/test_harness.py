@@ -21,7 +21,7 @@ from recorder_process import recorder_child_entry
 from audio_shm_ring import (
     SAMPLE_RATE, SAMPLE_WIDTH,
     SHM_NAME, SHM_SIZE,
-    RingBufferReader,
+    AudioShmRingReader,
 )
 
 TARGET_CYCLES = 3
@@ -33,7 +33,7 @@ TARGET_CYCLES = 3
 
 def master_loop(parent_conn, shm: SharedMemory, child: Process) -> None:
     """Synchronous master event loop. Runs TARGET_CYCLES wake->capture->VAD cycles."""
-    ring_reader = RingBufferReader(shm)
+    ring_reader = AudioShmRingReader(shm)
     cycles = 0
     vad_start_pos = 0
 

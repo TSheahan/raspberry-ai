@@ -62,7 +62,7 @@ class RecorderState:
         self._vad_ref         = None   # weakref → GatedVADProcessor
         self._oww_ref         = None   # weakref → OpenWakeWordProcessor
         self._transport_ref   = None   # strong ref → input transport (long-lived, no cycle)
-        self._ring_writer_ref = None   # weakref → RingBufferWriter processor
+        self._ring_writer_ref = None   # weakref → AudioShmRingWriteProcessor
 
     # -----------------------------------------------------------------------
     # Wiring  (called once in child main, after all objects are constructed)
@@ -186,7 +186,7 @@ class RecorderState:
     def write_audio(self, frame_bytes: bytes) -> None:
         """Write frame_bytes to the ring buffer and advance self._write_pos.
 
-        Called by RingBufferWriter.process_frame on every AudioRawFrame when
+        Called by AudioShmRingWriteProcessor.process_frame on every AudioRawFrame when
         not dormant. Must complete in under 1ms (runs on asyncio event loop).
         """
         raise NotImplementedError

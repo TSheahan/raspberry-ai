@@ -18,7 +18,7 @@ Break the voice pipeline into two OS processes, each pinned to a dedicated CPU c
 
 ### Recorder Child (Core 0, pinned)
 
-Owns the microphone. Runs the proven Pipecat pipeline: `transport.input() → GatedVADProcessor → OpenWakeWordProcessor → RingBufferWriter`. Writes raw audio frames to shared memory continuously. Sends state-transition signals over a Unix domain socket pipe. Never imports Claude, Deepgram, or any heavy dependency.
+Owns the microphone. Runs the proven Pipecat pipeline: `transport.input() → GatedVADProcessor → OpenWakeWordProcessor → AudioShmRingWriteProcessor`. Writes raw audio frames to shared memory continuously. Sends state-transition signals over a Unix domain socket pipe. Never imports Claude, Deepgram, or any heavy dependency.
 
 The recorder child is specifically a **recorder**, not a general audio process. Playback (TTS) is scoped to the master process or a separate pinned process if needed. This aligns with the design pressure of the 4-mic ReSpeaker hat — the recorder child is tuned for capture.
 

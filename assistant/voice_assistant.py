@@ -53,7 +53,7 @@ from tts_backends import TTSBackend, CartesiaTTS, ElevenLabsTTS, DeepgramTTS
 from audio_shm_ring import (
     CHANNELS, SAMPLE_RATE,
     SHM_NAME, SHM_SIZE,
-    RingBufferReader,
+    AudioShmRingReader,
 )
 
 logger = logger.bind(name="master")
@@ -82,8 +82,8 @@ _DG_KEEPALIVE_INTERVAL = 3.5
 # Streaming capture session — ring tail + Deepgram live WebSocket
 # ---------------------------------------------------------------------------
 
-class _CaptureSession:
-    """State for one WAKE_DETECTED → VAD_STOPPED capture window."""
+class _SttCaptureSession:
+    """State for one WAKE_DETECTED → VAD_STOPPED STT (Deepgram) capture window."""
 
     def __init__(self) -> None:
         self._transcripts: list[str] = []
@@ -101,8 +101,8 @@ class _CaptureSession:
 
 
 def _run_capture(
-    capture: _CaptureSession,
-    ring_reader: RingBufferReader,
+    capture: _SttCaptureSession,
+    ring_reader: AudioShmRingReader,
     wake_pos: int,
     dg_client: DeepgramClient,
 ) -> None:
@@ -263,7 +263,7 @@ def shutdown_child(pipe, child: Process) -> None:
 # ---------------------------------------------------------------------------
 
 def master_loop(pipe, shm: SharedMemory, child: Process) -> None:
-    ring_reader = RingBufferReader(shm)
+    ring_reader = AudioShmRingReader(shm)
     dg_client = DeepgramClient()
     agent = CursorAgentSession(
         workspace=_AGENT_WORKSPACE,
@@ -275,7 +275,7 @@ def master_loop(pipe, shm: SharedMemory, child: Process) -> None:
     tts = _TTS_BACKENDS[_TTS_BACKEND]()
     processing = False
     wake_pos = 0
-    capture: _CaptureSession | None = None
+    capture: _SttCaptureSession | None = None
 
     msg = pipe.recv()
     if msg["cmd"] != "READY":
@@ -304,7 +304,7 @@ def master_loop(pipe, shm: SharedMemory, child: Process) -> None:
                 # Pre-spawn agent (hides startup latency behind the STT window)
                 # and open Deepgram live session + ring tail concurrently.
                 agent.prepare()
-                capture = _CaptureSession()
+                capture = _SttCaptureSession()
                 capture.thread = threading.Thread(
                     target=_run_capture,
                     args=(capture, ring_reader, wake_pos, dg_client),

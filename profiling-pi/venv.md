@@ -39,8 +39,8 @@ Structured logging. Used at module scope by every source file in the voice agent
 This is the one third-party dependency that causes an import-time failure if
 missing — all SDK imports are deferred to construction time, but loguru is not.
 
-**Imported by:** `master.py`, `tts.py`, `recorder_child.py`, `ring_buffer.py`,
-`recorder_state.py`, `log_config.py`, `agent_session.py`
+**Imported by:** `voice_assistant.py`, `tts_backends.py`, `recorder_process.py`,
+`audio_shm_ring.py`, `recorder_state.py`, `logging_setup.py`, `agent_session.py`
 
 ### Install
 

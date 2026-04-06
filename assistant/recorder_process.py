@@ -50,7 +50,7 @@ from pipecat.audio.vad.vad_analyzer import VADParams
 from pipecat.audio.vad.vad_controller import VADController
 
 from recorder_state import RecorderState
-from audio_shm_ring import RingBufferWriter
+from audio_shm_ring import AudioShmRingWriter
 
 def _duty_cycle_enabled() -> bool:
     """True when the active log level is at or below PERF (8).
@@ -335,18 +335,18 @@ class DutyCycleExit(FrameProcessor):
 
 
 # ---------------------------------------------------------------------------
-# RecorderChild — real downstream port (ring + pipe), real upstream port
+# RingBackedRecorderState — real downstream port (SHM ring + pipe), real upstream port
 # ---------------------------------------------------------------------------
 
-class RecorderChild(RecorderState):
-    """RecorderState with real ring-buffer writes and real pipe signals.
+class RingBackedRecorderState(RecorderState):
+    """RecorderState with real shared-memory ring writes and real pipe signals.
 
     Pipecat-coupled methods (_start_stream, _stop_stream, _reset_oww_full,
     _clear_oww, _reset_silero, _drain_oww_predict) are inherited from the
     base class — they use the weakref wiring set up during pipeline init.
     """
 
-    def __init__(self, pipe, ring_writer: RingBufferWriter):
+    def __init__(self, pipe, ring_writer: AudioShmRingWriter):
         super().__init__(pipe=pipe, shm=None)
         self._ring_writer = ring_writer
 
@@ -546,10 +546,10 @@ class OpenWakeWordProcessor(FrameProcessor):
 
 
 # ---------------------------------------------------------------------------
-# AudioFrameWriter — writes audio frames via state.write_audio()
+# AudioShmRingWriteProcessor — writes audio frames via state.write_audio()
 # ---------------------------------------------------------------------------
 
-class AudioFrameWriter(FrameProcessor):
+class AudioShmRingWriteProcessor(FrameProcessor):
     """Pipeline tail: writes every audio frame to the ring buffer.
 
     Delegates to state.write_audio(), which performs the SharedMemory
@@ -599,7 +599,7 @@ class AudioFrameWriter(FrameProcessor):
 # command_listener — routes pipe commands to state.set_phase()
 # ---------------------------------------------------------------------------
 
-async def command_listener(state: RecorderChild, pipe, initiate_shutdown) -> None:
+async def command_listener(state: RingBackedRecorderState, pipe, initiate_shutdown) -> None:
     """Poll pipe for master commands; call set_phase() on each.
 
     Returns on SHUTDOWN (after delegating to initiate_shutdown).
@@ -630,8 +630,8 @@ async def command_listener(state: RecorderChild, pipe, initiate_shutdown) -> Non
 async def recorder_child_main(pipe, shm_name: str) -> None:
     shm = SharedMemory(name=shm_name, create=False)
     try:
-        ring_writer = RingBufferWriter(shm)
-        state = RecorderChild(pipe=pipe, ring_writer=ring_writer)
+        ring_writer = AudioShmRingWriter(shm)
+        state = RingBackedRecorderState(pipe=pipe, ring_writer=ring_writer)
 
         transport = LocalAudioTransport(
             LocalAudioTransportParams(
@@ -656,7 +656,7 @@ async def recorder_child_main(pipe, shm_name: str) -> None:
         )
 
         wake_processor = OpenWakeWordProcessor(state=state)
-        audio_writer = AudioFrameWriter(state=state)
+        audio_writer = AudioShmRingWriteProcessor(state=state)
 
         duty_collector = None
         if duty_cycle_on:
