@@ -38,16 +38,20 @@ class MasterState:
         self.wake_pos = 0
         self.capture: Any = None
         self.vad_speaking = False
+        # True after SET_CAPTURE until Deepgram thread is started on STATE_CHANGED(capture).
+        self.stt_start_pending = False
 
     @property
     def phase(self) -> str:
         return self._phase
 
     def _vad_context_ok(self) -> bool:
-        """Silero events apply while we are in capture or awaiting STATE_CHANGED(capture)."""
-        if self._phase == "capture":
-            return True
-        return self._phase == "wake_listen" and self.capture is not None
+        """Silero events apply only once we believe capture *and* STT session exists (§2d)."""
+        return self._phase == "capture" and self.capture is not None
+
+    def mark_stt_pending_after_set_capture(self) -> None:
+        """Call after sending SET_CAPTURE; cleared when STT thread arms or phase abandons capture."""
+        self.stt_start_pending = True
 
     def on_state_changed(self, new_phase: str) -> StateChangeResult:
         if not validate_phase(new_phase):
@@ -91,10 +95,15 @@ class MasterState:
     def _run_entry_hook(self, ph: str) -> None:
         if ph == "wake_listen":
             self.vad_speaking = False
+            self.stt_start_pending = False
             self._teardown_capture_if_live()
             self.processing = False
         elif ph == "capture":
             self.vad_speaking = False
+        elif ph == "idle":
+            self.stt_start_pending = False
+        elif ph == "dormant":
+            self.stt_start_pending = False
 
     def _teardown_capture_if_live(self) -> None:
         cap = self.capture

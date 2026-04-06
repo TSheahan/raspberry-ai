@@ -1,7 +1,7 @@
 # Master-side state object — design specification
 
 **Date:** 2026-04-06
-**Status:** Design brief — **Phase A (inter-process contract) signed off 2026-04-06** (§5a + §5d); Phase B (intra-process) ready to finalize. Not yet implemented.
+**Status:** **Phase A** signed off 2026-04-06 (§5a + §5d). **Phase B** implemented in `assistant/` (Pi-validated); §7b full synthetic matrix **deferred by user**.
 **Parent:** [interface_spec.md](./interface_spec.md), [recorder_state_spec.md](./recorder_state_spec.md)
 **Implements in:** `assistant/voice_assistant.py` (new class, replaces scattered locals in `master_loop`)
 
@@ -20,7 +20,7 @@ Design work is **strictly sequenced**:
 | Phase | Scope | Gate |
 |-------|--------|------|
 | **A — Inter-process contract** | Phase names, cycle order, transition classification (`forward` / `cycle_reset` / `stale` / `noop`), which events are legal in which phase, command ↔ confirmation mapping, shutdown sub-protocol. Expressed in spec + ideally one shared code module (`phase_protocol.py` or equivalent). **No** commitment to Python method names on either class beyond what is needed to name the contract. | **Complete — signed off 2026-04-06** (§5a + §5d accepted as the contract boundary; §5b–§5c remain supporting material). |
-| **B — Intra-process interfaces** | `MasterState.on_*` dispositions, `RecorderState` hook shapes, fast-forward side-effect ordering, resource fields on the master object, migration steps in `master_loop` / `set_phase()`. | **Open** — may now be finalized and implemented against §5. |
+| **B — Intra-process interfaces** | `MasterState.on_*` dispositions, `RecorderState` hook shapes, fast-forward side-effect ordering, resource fields on the master object, migration steps in `master_loop` / `set_phase()`. | **Delivered** in code (2026-04); §7b exhaustive matrix still deferred by user. |
 
 **Rule:** §4 (master message API), §7c (migration wiring), and process-local hook lists may be treated as **authoritative design targets** for Phase B. The **contract in §5** (especially §5a, §5d) remains the foundation; if it changes, Phase B must be revisited.
 
@@ -75,9 +75,13 @@ The master currently logs `STATE_CHANGED` messages and does nothing else with th
 
 The master treats `VAD_STOPPED` as the definitive "capture is done" signal and immediately tears down the STT session and enters the cognitive loop. There is no tracking of whether `VAD_STARTED` preceded it, and no accommodation for multiple start/stop cycles within a single capture phase (which would occur in dictation with pauses, or Silero retriggering on ambient noise between utterance segments).
 
+**Status:** Partially mitigated: `vad_speaking` + rejection of orphan `VAD_STOPPED` (§4d). Policy is still “one VAD span → cognitive”; multi-segment / multi-fire accumulation remains **future work** (§6, §3c) — acceptable for current product.
+
 ### 2d. Async resource lifecycle tied to handler location
 
 The STT capture session (`_SttCaptureSession`) is created in the `WAKE_DETECTED` handler and torn down in the `VAD_STOPPED` handler. The agent subprocess is pre-spawned in `WAKE_DETECTED` and consumed in `cognitive_loop`. The TTS warm-up is kicked off inside `cognitive_loop`. These resource lifecycles are coupled to specific message handlers rather than to state transitions, making it fragile to reorder or skip messages.
+
+**Delivered (2026-04):** STT session **creation** is tied to **accepted belief `capture`**: after `SET_CAPTURE`, the master sets `stt_start_pending`; when `STATE_CHANGED(capture)` is accepted, `voice_assistant._arm_stt_session()` starts the Deepgram + ring-tail thread (`master_state.py` / `voice_assistant.py`). **Tear-down** still runs on `VAD_STOPPED` (policy) and is **idempotent** with `MasterState` exit hooks on phase transitions (fast-forward / stale recovery). **`agent.prepare()`** remains on `WAKE_DETECTED` to hide subprocess startup behind recorder transition latency (intentional). **`tts.warm` / `tts.play`** remain in `cognitive_loop` (§6 non-goals). **Assumption:** the child normally emits `STATE_CHANGED(capture)` before `VAD_*` that matter for that utterance; the master ignores VAD until `phase == capture` **and** a live `_SttCaptureSession` exists.
 
 ---
 
@@ -98,6 +102,8 @@ The master sends a command (e.g. `SET_CAPTURE`) and immediately continues proces
 ### 3c. Multi-fire VAD
 
 Silero VAD can produce multiple `VAD_STARTED`/`VAD_STOPPED` pairs within a single capture phase. The stop_secs parameter (currently 1.8s) controls how long silence must persist before `VAD_STOPPED` fires, but shorter pauses within an utterance can still produce a stop followed by a restart. A future dictation mode would intentionally allow this.
+
+**Status:** Same as §2c — partial handling today; full multi-fire policy **deferred** (acceptable for now).
 
 ### 3d. Spurious or duplicate messages
 
@@ -348,6 +354,8 @@ The shared contract does not dictate:
 If the class is small (<150 lines), keep it in `voice_assistant.py` near the top (after imports, before `_SttCaptureSession`). If it grows, extract to `master_state.py` alongside `recorder_state.py`.
 
 ### 7b. Testing
+
+**Deferred by user (2026-04):** the exhaustive synthetic matrix below is **not** required for gate sign-off; a **subset** is implemented in `assistant/test_phase_protocol.py`, `assistant/test_master_state.py`, and Pi smoke. The list remains the target when someone chooses to expand automated coverage.
 
 The state object is pure logic (no I/O, no pipe access). It can be unit-tested with synthetic message sequences:
 

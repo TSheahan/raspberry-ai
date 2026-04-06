@@ -6,8 +6,8 @@ on core 0, then runs a synchronous event loop that:
 
   1. Waits for READY from the recorder child
   2. Sends SET_WAKE_LISTEN
-  3. On WAKE_DETECTED: pre-spawns agent subprocess (EU-6) and opens Deepgram live
-     WebSocket + starts ring-tail thread (EU-5) concurrently; sends SET_CAPTURE
+  3. On WAKE_DETECTED: pre-spawns agent subprocess (EU-6); sends SET_CAPTURE; on
+     STATE_CHANGED(capture) starts Deepgram live WebSocket + ring-tail thread (EU-5)
   4. On VAD_STOPPED: stops ring-tail, finalizes Deepgram stream, assembles transcript,
      calls cognitive_loop: primes TTS (warm) in parallel with agent.run(), then
      tts.play() for speech output (EU-7)
@@ -196,6 +196,25 @@ def _run_capture(
 # Cognitive loop — agent response + TTS output (EU-6/EU-7)
 # ---------------------------------------------------------------------------
 
+def _arm_stt_session(
+    state: MasterState,
+    ring_reader: AudioShmRingReader,
+    dg_client: DeepgramClient,
+) -> None:
+    """Start Deepgram + ring tail once belief is capture (STATE_CHANGED) and SET_CAPTURE was sent."""
+    if not state.stt_start_pending or state.capture is not None:
+        return
+    cap = _SttCaptureSession()
+    state.capture = cap
+    state.stt_start_pending = False
+    cap.thread = threading.Thread(
+        target=_run_capture,
+        args=(cap, ring_reader, state.wake_pos, dg_client),
+        daemon=True,
+    )
+    cap.thread.start()
+
+
 def cognitive_loop(transcript: str, agent: AgentSession, tts: TTSBackend) -> None:
     """Feed transcript to agent; synthesise and play each yielded sentence chunk."""
     if not transcript:
@@ -290,7 +309,24 @@ def master_loop(pipe, shm: SharedMemory, child: Process) -> None:
             cmd = msg["cmd"]
 
             if cmd == "STATE_CHANGED":
-                state.on_state_changed(msg["state"])
+                res = state.on_state_changed(msg["state"])
+                if (
+                    res.accepted
+                    and state.phase == "capture"
+                    and state.capture is None
+                    and state.stt_start_pending
+                ):
+                    _arm_stt_session(state, ring_reader, dg_client)
+                elif (
+                    res.accepted
+                    and state.phase == "capture"
+                    and state.capture is None
+                    and not state.stt_start_pending
+                ):
+                    logger.warning(
+                        "[master] STATE_CHANGED(capture) but STT not pending — "
+                        "possible protocol skew",
+                    )
 
             elif cmd == "WAKE_DETECTED":
                 if not state.on_wake_detected(
@@ -305,18 +341,11 @@ def master_loop(pipe, shm: SharedMemory, child: Process) -> None:
                 logger.info("[master] WAKE_DETECTED  score={:.3f}  keyword={}",
                             msg["score"], msg["keyword"])
 
-                # Pre-spawn agent (hides startup latency behind the STT window)
-                # and open Deepgram live session + ring tail concurrently.
+                # Pre-spawn agent (hides startup latency behind the STT window).
+                # Deepgram + ring tail start on STATE_CHANGED(capture) (master_state_spec §2d).
                 agent.prepare()
-                cap = _SttCaptureSession()
-                state.capture = cap
-                cap.thread = threading.Thread(
-                    target=_run_capture,
-                    args=(cap, ring_reader, state.wake_pos, dg_client),
-                    daemon=True,
-                )
-                cap.thread.start()
                 pipe.send({"cmd": "SET_CAPTURE"})
+                state.mark_stt_pending_after_set_capture()
 
             elif cmd == "VAD_STARTED":
                 if state.on_vad_started(msg["write_pos"]):

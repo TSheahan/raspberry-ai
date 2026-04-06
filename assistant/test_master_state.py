@@ -28,9 +28,12 @@ def test_wake_gated() -> None:
     assert not s.on_wake_detected(2, 0.9, "ok")
 
 
-def test_vad_after_capture_assigned_before_phase_confirm() -> None:
+def test_vad_requires_capture_belief_and_live_session() -> None:
     s = MasterState()
     s.on_state_changed("wake_listen")
+    assert not s.on_vad_started(0)
+    s.on_state_changed("capture")
+    assert not s.on_vad_started(0)
     s.capture = object()
     assert s.on_vad_started(0)
     assert s.on_vad_stopped(1)
@@ -39,6 +42,7 @@ def test_vad_after_capture_assigned_before_phase_confirm() -> None:
 def test_orphan_vad_stopped_rejected() -> None:
     s = MasterState()
     s.on_state_changed("wake_listen")
+    s.on_state_changed("capture")
     s.capture = object()
     assert not s.on_vad_stopped(0)
 
@@ -63,12 +67,21 @@ def test_fast_forward_wake_to_idle_tears_down_capture() -> None:
     assert cap.stop_event.is_set()
 
 
+def test_stt_pending_cleared_on_idle_entry() -> None:
+    s = MasterState()
+    s.on_state_changed("wake_listen")
+    s.stt_start_pending = True
+    s.on_state_changed("idle")
+    assert not s.stt_start_pending
+
+
 def main() -> None:
     test_stale_state_changed()
     test_wake_gated()
-    test_vad_after_capture_assigned_before_phase_confirm()
+    test_vad_requires_capture_belief_and_live_session()
     test_orphan_vad_stopped_rejected()
     test_fast_forward_wake_to_idle_tears_down_capture()
+    test_stt_pending_cleared_on_idle_entry()
     print("test_master_state OK")
 
 
