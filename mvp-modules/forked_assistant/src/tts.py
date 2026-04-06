@@ -157,6 +157,23 @@ class TTSBackend(ABC):
         """
         ...
 
+    def synthesise_to_file(self, text: str, path: str | Path) -> None:
+        """Synthesise text and write to a WAV file instead of playing audio.
+
+        Default implementation collects PCM via _synthesise_pcm(). Backends
+        that don't override _synthesise_pcm raise NotImplementedError.
+        """
+        pcm = self._synthesise_pcm(text)
+        _write_wav(pcm, path, self._file_sample_rate())
+
+    def _synthesise_pcm(self, text: str) -> bytes:
+        """Return raw S16_LE PCM bytes for the given text. Override per backend."""
+        raise NotImplementedError(f"{type(self).__name__} does not support file output yet")
+
+    def _file_sample_rate(self) -> int:
+        """Sample rate for file output. Override per backend."""
+        raise NotImplementedError
+
     @abstractmethod
     def close(self) -> None:
         """Release audio I/O resources. Call once at process exit."""
@@ -251,6 +268,12 @@ class DeepgramTTS(TTSBackend):
     def close(self) -> None:
         """No persistent audio resources to release (output opened per-turn)."""
         logger.debug("[tts] DeepgramTTS closed")
+
+    def _file_sample_rate(self) -> int:
+        return self._sample_rate
+
+    def _synthesise_pcm(self, text: str) -> bytes:
+        return self._synthesise(text)
 
     def _synthesise(self, text: str) -> bytes:
         """Call Deepgram Aura REST API and return raw linear16 PCM bytes."""
@@ -404,6 +427,46 @@ class CartesiaTTS(TTSBackend):
         finally:
             out.close()
 
+    def _file_sample_rate(self) -> int:
+        return self._sample_rate
+
+    def _synthesise_pcm(self, text: str) -> bytes:
+        chunks: list[bytes] = []
+        try:
+            with self._ws_lock:
+                self._open_connection_if_needed()
+                conn = self._ws
+                assert conn is not None
+                ctx_id = str(uuid.uuid4())
+                tctx = conn.context(
+                    ctx_id,
+                    model_id=self._model,
+                    voice=self._voice_spec(),
+                    output_format=self._output_format(),
+                )
+                send_kw: dict = {
+                    "model_id": self._model,
+                    "transcript": text,
+                    "voice": self._voice_spec(),
+                    "output_format": self._output_format(),
+                    "continue_": False,
+                }
+                gen = self._generation_config_dict()
+                if gen is not None:
+                    send_kw["generation_config"] = gen
+                tctx.send(**send_kw)
+                for response in tctx.receive():
+                    if response.type == "chunk" and response.audio:
+                        chunks.append(response.audio)
+                    elif response.type == "error":
+                        msg = getattr(response, "message", None) or getattr(response, "error", None)
+                        logger.error("[tts] cartesia API error  status={}  message={!r}",
+                                     getattr(response, "status_code", "?"), msg)
+                        break
+        except Exception:
+            logger.exception("[tts] Cartesia synthesis failed for chunk: {!r}", text[:60])
+        return b"".join(chunks)
+
     def close(self) -> None:
         """Close shared WebSocket."""
         with self._ws_lock:
@@ -534,6 +597,29 @@ class ElevenLabsTTS(TTSBackend):
         finally:
             out.close()
 
+    def _file_sample_rate(self) -> int:
+        return self._sample_rate
+
+    def _synthesise_pcm(self, text: str) -> bytes:
+        chunks: list[bytes] = []
+        try:
+            stream_kwargs: dict = {
+                "voice_id": self._voice_id,
+                "text": text,
+                "model_id": self._model,
+                "output_format": "pcm_24000",
+            }
+            if self._voice_settings:
+                stream_kwargs["voice_settings"] = self._voice_settings
+            if self._optimize_streaming_latency is not None:
+                stream_kwargs["optimize_streaming_latency"] = self._optimize_streaming_latency
+            for pcm_chunk in self._client.text_to_speech.stream(**stream_kwargs):
+                if pcm_chunk:
+                    chunks.append(pcm_chunk)
+        except Exception:
+            logger.exception("[tts] ElevenLabs synthesis failed: {!r}", text[:60])
+        return b"".join(chunks)
+
     def close(self) -> None:
         """No persistent audio resources to release (output opened per-turn)."""
         logger.debug("[tts] ElevenLabsTTS closed")
@@ -651,6 +737,24 @@ def _strip_markdown(text: str) -> str:
     return text.strip()
 
 
+def _write_wav(pcm: bytes, path: str | Path, sample_rate: int, channels: int = 1) -> None:
+    """Write raw S16_LE PCM bytes to a WAV file."""
+    import struct as _struct
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    data_len = len(pcm)
+    with open(path, "wb") as f:
+        f.write(b"RIFF")
+        f.write(_struct.pack("<I", 36 + data_len))
+        f.write(b"WAVE")
+        f.write(b"fmt ")
+        f.write(_struct.pack("<IHHIIHH", 16, 1, channels, sample_rate,
+                             sample_rate * channels * 2, channels * 2, 16))
+        f.write(b"data")
+        f.write(_struct.pack("<I", data_len))
+        f.write(pcm)
+
+
 def _monotonic() -> float:
     import time
     return time.monotonic()
@@ -674,6 +778,8 @@ if __name__ == "__main__":
     p.add_argument("--backend", "-b", choices=["cartesia", "elevenlabs", "deepgram", "piper"],
                    default="cartesia", help="TTS backend (default: cartesia)")
     p.add_argument("--warm", action="store_true", help="Call warm() before play()")
+    p.add_argument("--out", "-o", type=str, default=None,
+                   help="Write WAV to file instead of playing audio")
     args = p.parse_args()
 
     backends = {
@@ -692,8 +798,12 @@ if __name__ == "__main__":
         logger.info("[smoke] warm done  {:.0f}ms", (time.monotonic() - t0) * 1000)
 
     t1 = time.monotonic()
-    tts.play(iter([args.text]))
-    logger.info("[smoke] play done  {:.0f}ms", (time.monotonic() - t1) * 1000)
+    if args.out:
+        tts.synthesise_to_file(args.text, args.out)
+        logger.info("[smoke] wrote {}  {:.0f}ms", args.out, (time.monotonic() - t1) * 1000)
+    else:
+        tts.play(iter([args.text]))
+        logger.info("[smoke] play done  {:.0f}ms", (time.monotonic() - t1) * 1000)
 
     tts.close()
     logger.info("[smoke] total  {:.0f}ms", (time.monotonic() - t0) * 1000)
