@@ -148,19 +148,21 @@ Supervise mode improves group signal delivery, but **`CursorAgentSession.run()`*
 
 ---
 
-## Appendix A — Orphan reaping (implemented 2026-04-06)
+## Appendix A — Orphan reaping (implemented 2026-04-06, tightened 2026-04-06)
 
 **Supersedes:** Previous “escape hatch” stub. Orphan `worker-server` processes were confirmed in production — the Cursor CLI spawns a `worker-server` child ~15s in, then the leader exits cleanly at ~20s, leaving the worker reparented to init at ~140MB RSS each. Four agent turns would OOM a 1GB Pi.
 
 **Implementation (in wrapper):**
 
 1. **`pgid_snapshot` fix:** `ps -g` selects by *session*, not process group; replaced with `pgrep --pgroup` → `ps -p` so orphans are visible after the session leader exits.
-2. **`reap_orphans` function** runs after the leader exits and the exit event is logged:
-   - **Settle** (`WRAPPER_ORPHAN_SETTLE`, default 3s) — lets worker-servers finish in-flight I/O.
-   - **Snapshot** — if PGID is clean, log `status=clean` and return.
-   - **SIGTERM** the whole PGID (`kill -TERM -- -$pgid`).
-   - **Poll** up to `WRAPPER_ORPHAN_KILL_GRACE` (default 4s), checking each second.
-   - **SIGKILL** any survivors; log final status.
+2. **`_poll_until_clean` helper:** polls PGID at 250ms intervals up to a caller-specified iteration ceiling. Returns success (0) as soon as the PGID has no living processes, or failure (1) if the ceiling is reached. Reports iteration count via `$_poll_iters` for log timing.
+3. **`reap_orphans` function** runs after the leader exits and the exit event is logged:
+   - **Settle** (`WRAPPER_ORPHAN_SETTLE`, default 2s ceiling) — polls every 250ms; exits early as soon as PGID is clean. Previous fixed 3s sleep wasted the full interval when no orphans existed or when orphans exited promptly.
+   - **SIGTERM** the whole PGID (`kill -TERM -- -$pgid`) — only reached if orphans survived settle.
+   - **Kill-grace** (`WRAPPER_ORPHAN_KILL_GRACE`, default 3s ceiling) — polls every 250ms after SIGTERM.
+   - **SIGKILL** any survivors; 250ms check after kill; log final status.
+
+**Timing rationale (2026-04-06 tightening):** Production log showed orphan worker-server died within 1s of SIGTERM, but the wrapper spent 3s in fixed settle sleep + 1s in kill-grace polling = 4s total overhead. With poll-based settle, the same scenario completes in ~2.25s (2s settle ceiling reached with orphan present, SIGTERM, first 250ms poll finds it clean). When no orphans exist (common for short agent responses that don't spawn worker-server), settle exits at the first 250ms poll = 250ms total overhead vs. the previous fixed 3s.
 
 **No extra sudo needed** — the wrapper runs as `agent` (same user as the orphans).
 
