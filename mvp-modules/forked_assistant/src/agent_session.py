@@ -300,6 +300,9 @@ class CursorAgentSession(AgentSession):
         # interpreting subsequent flags (e.g. --resume) as its own options.
         cmd = (["sudo", "-u", _AGENT_USER, "-H", "--"] + agent_args) if _AGENT_USER else agent_args
 
+        # start_new_session gives the sudo→wrapper tree its own session.
+        # The wrapper internally uses setsid (with fd3 stdin preservation)
+        # to place the real CLI in a further sub-group for targeted killpg.
         self._process = subprocess.Popen(
             cmd,
             stdin=subprocess.PIPE,

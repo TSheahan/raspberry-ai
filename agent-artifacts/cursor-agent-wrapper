@@ -48,29 +48,32 @@ main() {
     exit 127
   fi
 
-  if ! command -v setsid >/dev/null 2>&1; then
-    log_event fatal "setsid_not_found"
-    exit 126
-  fi
+  # Give the real CLI its own process group (via setsid) so the wrapper
+  # can kill -TERM the entire child tree on teardown.  Bash & redirects
+  # the child's stdin to /dev/null, so we save stdin to fd 3 first and
+  # re-attach it to the setsid child.
+  exec 3<&0
 
-  local child
-  setsid -- "$REAL_BIN" "$@" &
-  child=$!
+  setsid -- "$REAL_BIN" "$@" <&3 &
+  local child=$!
+  exec 3<&-
+
   log_event spawn_real "child_pid=${child} real_bin=${REAL_BIN}"
 
   forward_signal() {
     local name="$1"
-    log_event signal_forward "sig=${name} kill_target_pgid=-${child}"
+    log_event signal_forward "sig=${name} kill_target=-${child}"
     kill -TERM -- -"${child}" 2>/dev/null || true
   }
 
   trap 'forward_signal TERM' TERM
-  trap 'forward_signal INT' INT
+  trap 'forward_signal INT'  INT
 
   local wait_status=0
   wait "$child" || wait_status=$?
 
   trap - TERM INT
+  log_event exit "child_exit=${wait_status}"
   exit "$wait_status"
 }
 

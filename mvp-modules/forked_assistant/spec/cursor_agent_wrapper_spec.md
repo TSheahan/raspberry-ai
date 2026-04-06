@@ -62,11 +62,11 @@ Add a **sparse** top-level directory at the repo root (sibling to `mvp-modules/`
 ### 5b. Mode B — Supervising parent **(selected)**
 
 1. Wrapper process stays resident (effective user **`agent`** after `sudo -u agent`).
-2. Spawns the real Cursor CLI as a **child** in a **new session / process group** (`setsid` or equivalent) so **`killpg`** on the child’s PGID targets the CLI tree when the tree shares that group.
+2. Spawns the real Cursor CLI as a **child** in a **new session / process group** (`setsid`) so **`kill -TERM -- -$child`** on the child’s PGID targets the CLI tree. **Stdin preservation:** bash `&` redirects backgrounded jobs to `/dev/null`; the wrapper saves stdin to fd 3 before backgrounding and re-attaches it to the `setsid` child (`exec 3<&0; setsid -- "$REAL_BIN" "$@" <&3 &`). This keeps the prompt pipe from `CursorAgentSession` connected while still giving the child its own process group.
 3. On **SIGTERM** / **SIGINT**, forward to the child process group; reap child; exit with the child’s exit status (or a defined mapping on signal-induced death).
 4. **stderr:** Child’s stderr remains the **same fd** as inherited from the parent chain so Python’s **`stderr=subprocess.PIPE`** in `CursorAgentSession` still receives CLI diagnostics (no duplicate tee to files unless explicitly added later).
 
-**Validation:** Required on Pi with `AGENT_USER` + `sudo` — confirm with `ps -o pid,pgid,sid` that supervise + `killpg` matches expectations (see shutdown doc).
+**Validation (2026-04-06):** Confirmed on Pi with `AGENT_USER` + `sudo`. `ps -o pid,pgid,sid` shows child PGID = child PID, differs from wrapper PGID. Smoke test passes end-to-end through wrapper.
 
 **Product direction:** Prefer correctness from **wrapper + `CursorAgentSession`**, not from broad sudo for arbitrary `kill`.
 
@@ -181,4 +181,4 @@ Canonical design: **this file** (`mvp-modules/forked_assistant/spec/cursor_agent
 | D7 | Sudo to run agent | **Wrapper path only** (wrapper-only policy) | §7, `agent-user-setup` migration note |
 | D8 | Escape hatch | **Deferred** | Appendix A |
 
-**Coverage note:** Open items are **explicitly listed** (D5 rotation template, Pi validation of PGID under `sudo`). Everything else in this spec is **closed** for the first implementation pass.
+**Coverage note:** Open items are **explicitly listed** (D5 rotation template). PGID validation under `sudo` is **closed** (2026-04-06 smoke test confirmed child PGID isolation). Everything else in this spec is **closed** for the first implementation pass.

@@ -28,7 +28,7 @@
 |--------|------------------------|---------------------------|-----------------|
 | Log file exists before first assistant run | yes | **Yes** — bootstrap step 4 creates file | None |
 | Owner / mode | `agent:agent`, **0640** | **Yes** — step 4 + Verify | None |
-| Wrapper can append while running as `agent` | yes | **Yes** — matches effective UID of supervised child chain | Validate on Pi after wrapper lands |
+| Wrapper can append while running as `agent` | yes | **Yes** — matches effective UID of supervised child chain | **Validated** on Pi (2026-04-06 smoke test) |
 | `logrotate` / retention | weekly (or similar), create new file with same owner/mode | **No** — not in Instructions yet | **Gap:** add `/etc/logrotate.d/agent-wrapper` (or document manual rotation). Until then, log may grow unbounded — acceptable for early Pi bring-up only |
 | Audit “argv in logs” risk | low (transcript on stdin, not argv) | **Partially** — spec §6 + caller docs; no automated test | None for provisioning |
 | Log file unwritable (spec §10) | Defined behaviour | **Yes** — wrapper falls back to **stderr only** for log lines and still spawns the child | Documented here (implementation choice) |
@@ -41,7 +41,7 @@
 
 ### 1. Add repo files (developer / in git)
 
-- `agent-artifacts/cursor-agent-wrapper` — supervising launcher (§5b); bash, `setsid` + `kill` to child process group, logging per spec §6.
+- `agent-artifacts/cursor-agent-wrapper` — supervising launcher (§5b); bash, `setsid` with fd3 stdin preservation + `kill -TERM` to child process group, logging per spec §6.
 - `agent-artifacts/scripts/smoke-wrapped-agent.py` — optional stdlib-only one-shot run: same subprocess shape as `master.py` / `CursorAgentSession`, without the voice stack.
 - `agent-artifacts/scripts/install-cursor-agent-wrapper.sh` — must:
   - `mkdir -p /home/agent/artifacts`
@@ -168,6 +168,8 @@ python3 agent-artifacts/scripts/smoke-wrapped-agent.py "Say hello in five words.
 ```
 
 This mirrors `CursorAgentSession` spawn (`sudo -u agent` when `AGENT_USER` is set, `start_new_session=True`, transcript on stdin only). **Stdout** is raw stream-json lines; **stderr** is the CLI (and optional wrapper log fallback). Use `--env-file /home/voice/.env` instead of `set -a` if you prefer.
+
+**Result (2026-04-06):** Smoke test **passed**. stream-json events received (system → user → assistant deltas → result), exit code 0, wrapper log shows `start` → `spawn_real` → `exit child_exit=0`. The initial wrapper implementation used bare `setsid ... &` which broke stdin (bash redirects backgrounded jobs to `/dev/null`). Fixed by saving stdin to fd 3 before backgrounding and re-attaching it to the `setsid` child (`exec 3<&0; setsid -- "$REAL_BIN" "$@" <&3 &`). PGID isolation confirmed: child PGID equals child PID, differs from wrapper PGID.
 
 ---
 
