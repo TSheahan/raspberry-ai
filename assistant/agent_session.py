@@ -356,19 +356,22 @@ class CursorAgentSession(AgentSession):
         sentence_buffer = ""
         yielded_text = ""
 
-        stderr_stop = threading.Event()
+        stderr_lines: list[str] = []
 
         def _drain_stderr() -> None:
+            """Read stderr until EOF. Runs for the full subprocess lifetime so
+            the pipe buffer never fills and blocks child writes."""
             err = process.stderr
             if err is None:
                 return
             try:
                 for line in iter(err.readline, ""):
-                    if stderr_stop.is_set():
-                        break
                     line = line.rstrip()
                     if line:
+                        stderr_lines.append(line)
                         logger.warning("[agent/stderr] {}", line)
+            except ValueError:
+                pass  # pipe closed from our side during cleanup
             except Exception:
                 logger.exception("[agent] stderr reader failed")
 
@@ -426,8 +429,6 @@ class CursorAgentSession(AgentSession):
                                  result_event.get("is_error"), len(final_result), delta_count)
                     if result_event.get("is_error"):
                         logger.error("[agent] is_error=true in result event: {}", final_result)
-                        process.wait()
-                        self._process = None
                         raise AgentError(f"agent reported error: {final_result}")
                     logger.info("[agent] result ok  duration={}ms  out_tokens={}  cache_read={}",
                                 duration_ms,
@@ -437,20 +438,23 @@ class CursorAgentSession(AgentSession):
                 else:
                     logger.debug("[agent/evt] ignored type={!r}", event_type)
         finally:
-            stderr_stop.set()
-            stderr_thread.join(timeout=2)
-
-        process.wait()
-        self._process = None
-
-        if process.returncode != 0:
-            stderr_out = ""
+            # Stdout is exhausted (EOF or exception). Wait for the process to
+            # exit *while* stderr keeps draining — avoids pipe-buffer deadlock
+            # if the child (or wrapper heartbeats) is still writing to stderr.
+            process.wait()
+            self._process = None
+            # Close the stderr pipe fd so the drain thread gets EOF even if
+            # orphaned grandchildren inherited the fd and are still alive.
             try:
-                stderr_out = process.stderr.read(500).strip()
+                process.stderr.close()
             except Exception:
                 pass
+            stderr_thread.join(timeout=3)
+
+        if process.returncode != 0:
+            snippet = " ".join(stderr_lines[-5:])[:500] if stderr_lines else ""
             raise AgentError(
-                f"agent exited with code {process.returncode}: {stderr_out}"
+                f"agent exited with code {process.returncode}: {snippet}"
             )
 
         if captured_session_id:
