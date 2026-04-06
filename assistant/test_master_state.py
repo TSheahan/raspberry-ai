@@ -75,6 +75,25 @@ def test_stt_pending_cleared_on_idle_entry() -> None:
     assert not s.stt_start_pending
 
 
+def test_agent_prepare_tracking() -> None:
+    s = MasterState()
+    s.on_state_changed("wake_listen")
+    assert not s.agent_prepare_done
+    s.note_agent_prepare()
+    assert s.agent_prepare_done
+    s.on_state_changed("idle")
+    s.on_state_changed("wake_listen")
+    assert not s.agent_prepare_done
+
+
+def test_note_agent_prepare_idempotent_after_double_call() -> None:
+    s = MasterState()
+    s.on_state_changed("wake_listen")
+    s.note_agent_prepare()
+    s.note_agent_prepare()
+    assert s.agent_prepare_done
+
+
 def main() -> None:
     test_stale_state_changed()
     test_wake_gated()
@@ -82,6 +101,8 @@ def main() -> None:
     test_orphan_vad_stopped_rejected()
     test_fast_forward_wake_to_idle_tears_down_capture()
     test_stt_pending_cleared_on_idle_entry()
+    test_agent_prepare_tracking()
+    test_note_agent_prepare_idempotent_after_double_call()
     print("test_master_state OK")
 
 

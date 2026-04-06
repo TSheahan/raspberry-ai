@@ -2,7 +2,8 @@
 master_state.py — Master process phase belief + VAD gating (master_state_spec.md §4).
 
 Owns believed child phase (from STATE_CHANGED), processing / wake_pos / capture
-session refs, and vad_speaking. Does not send on the pipe; the event loop acts.
+session refs, vad_speaking, and per-cycle agent `prepare()` tracking (§4f).
+Does not send on the pipe; the event loop acts.
 """
 
 from __future__ import annotations
@@ -40,6 +41,8 @@ class MasterState:
         self.vad_speaking = False
         # True after SET_CAPTURE until Deepgram thread is started on STATE_CHANGED(capture).
         self.stt_start_pending = False
+        # True after agent.prepare() this wake cycle; reset on wake_listen/idle/dormant entry.
+        self.agent_prepare_done = False
 
     @property
     def phase(self) -> str:
@@ -52,6 +55,16 @@ class MasterState:
     def mark_stt_pending_after_set_capture(self) -> None:
         """Call after sending SET_CAPTURE; cleared when STT thread arms or phase abandons capture."""
         self.stt_start_pending = True
+
+    def note_agent_prepare(self) -> None:
+        """Call immediately after agent.prepare() on WAKE_DETECTED. Warns if already done this cycle."""
+        if self.agent_prepare_done:
+            _log.warning(
+                "[master_state] note_agent_prepare called again before cycle reset — "
+                "possible double wake path",
+            )
+            return
+        self.agent_prepare_done = True
 
     def on_state_changed(self, new_phase: str) -> StateChangeResult:
         if not validate_phase(new_phase):
@@ -96,14 +109,17 @@ class MasterState:
         if ph == "wake_listen":
             self.vad_speaking = False
             self.stt_start_pending = False
+            self.agent_prepare_done = False
             self._teardown_capture_if_live()
             self.processing = False
         elif ph == "capture":
             self.vad_speaking = False
         elif ph == "idle":
             self.stt_start_pending = False
+            self.agent_prepare_done = False
         elif ph == "dormant":
             self.stt_start_pending = False
+            self.agent_prepare_done = False
 
     def _teardown_capture_if_live(self) -> None:
         cap = self.capture

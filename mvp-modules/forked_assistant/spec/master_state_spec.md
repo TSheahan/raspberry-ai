@@ -201,10 +201,10 @@ The event loop reads the pipe, calls the appropriate method, and acts on the res
 
 The state object owns references to resources whose lifetime is tied to phases:
 
-- `capture: _SttCaptureSession | None` — created on `WAKE_DETECTED`, torn down on capture exit.
-- `agent: CursorAgentSession` — long-lived, but `prepare()` is called per-wake. The state object tracks whether a prepare has been issued for the current cycle.
+- `capture: _SttCaptureSession | None` — created when STT arms after **accepted** `STATE_CHANGED(capture)` while `stt_start_pending` (see §2d); torn down on capture exit hooks and (policy) on `VAD_STOPPED` in the event loop, idempotently with hooks.
+- **Agent `prepare()`** — the `AgentSession` instance stays owned by `master_loop`; `MasterState` tracks `agent_prepare_done` per wake cycle. Reset on `wake_listen` (and `idle` / `dormant`) entry; set via `note_agent_prepare()` immediately after `agent.prepare()` on `WAKE_DETECTED`. A second `note_agent_prepare()` before reset logs a warning (double-wake / logic bug).
 
-Teardown of phase-bound resources happens in the side-effect methods (§4c), not in the event handlers directly.
+Teardown of phase-bound resources happens in the side-effect methods (§4c), not in the event handlers directly (except the intentional `VAD_STOPPED` policy path for utterance completion).
 
 ---
 

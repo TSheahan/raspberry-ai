@@ -344,6 +344,7 @@ def master_loop(pipe, shm: SharedMemory, child: Process) -> None:
                 # Pre-spawn agent (hides startup latency behind the STT window).
                 # Deepgram + ring tail start on STATE_CHANGED(capture) (master_state_spec §2d).
                 agent.prepare()
+                state.note_agent_prepare()
                 pipe.send({"cmd": "SET_CAPTURE"})
                 state.mark_stt_pending_after_set_capture()
 
