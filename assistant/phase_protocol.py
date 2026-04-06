@@ -41,6 +41,46 @@ def validate_phase(name: str) -> bool:
     return name in PHASES
 
 
+def exit_phases_for_belief_update(belief: str, reported: str) -> list[str]:
+    """Phases whose master-side **exit** hooks must run, in order, when belief
+    updates from ``belief`` to ``reported`` (master_state_spec.md §4c).
+
+    Call only when ``classify_transition`` is not STALE/NOOP. ``TO_DORMANT``
+    exits the current phase only. ``CYCLE_RESET`` → ``wake_listen`` from
+    ``capture`` runs ``capture`` then ``idle`` exits (``idle`` exit is a no-op
+    today). ``FORWARD`` on the ring exits ``belief`` then each strictly
+    intermediate phase up to ``reported``.
+    """
+    tc = classify_transition(belief, reported)
+    if tc.kind in (TransitionKind.STALE, TransitionKind.NOOP):
+        return []
+
+    if tc.kind == TransitionKind.TO_DORMANT:
+        if belief == "dormant":
+            return []
+        return [belief]
+
+    if tc.kind == TransitionKind.FORWARD:
+        ib = _PHASE_IDX[belief]
+        ir = _PHASE_IDX[reported]
+        out: list[str] = [belief]
+        out.extend(PHASE_CYCLE[ib + 1 : ir])
+        return out
+
+    if tc.kind == TransitionKind.CYCLE_RESET and reported == "wake_listen":
+        if belief == "dormant":
+            return []
+        if belief == "idle":
+            return ["idle"]
+        if belief == "capture":
+            return ["capture", "idle"]
+        if belief == "wake_listen":
+            return []
+        return []
+
+    return []
+
+
 def classify_transition(current: str, proposed: str) -> TransitionClass:
     """Classify a phase change per master_state_spec.md §5a.
 
@@ -101,6 +141,15 @@ def _self_test() -> None:
 
     assert c("bogus", "wake_listen").kind == T.STALE
     assert c("wake_listen", "bogus").kind == T.STALE
+
+    x = exit_phases_for_belief_update
+    assert x("wake_listen", "capture") == ["wake_listen"]
+    assert x("capture", "idle") == ["capture"]
+    assert x("wake_listen", "idle") == ["wake_listen", "capture"]
+    assert x("capture", "wake_listen") == ["capture", "idle"]
+    assert x("idle", "wake_listen") == ["idle"]
+    assert x("dormant", "wake_listen") == []
+    assert x("capture", "dormant") == ["capture"]
 
 
 if __name__ == "__main__":

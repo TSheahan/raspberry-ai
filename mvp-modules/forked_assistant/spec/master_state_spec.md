@@ -328,7 +328,7 @@ The shared contract does not dictate:
 ### Phase B (intra-process) — in scope after Phase A sign-off
 
 - **`phase_protocol.py` + `RecorderState` retrofit** — implemented 2026-04-06 (`classify_transition` gate in `set_phase()`). **User checkpoint at §7c** before `MasterState`.
-- **Central `MasterState` class** in `voice_assistant.py` (or `master_state.py` if size warrants).
+- **Central `MasterState` class** — implemented 2026-04-06 in [`assistant/master_state.py`](../../assistant/master_state.py); wired in [`assistant/voice_assistant.py`](../../assistant/voice_assistant.py) `master_loop` (`STATE_CHANGED`, wake, VAD, locals replaced).
 - Phase belief tracking with forward/stale/fast-forward logic; VAD validation; resource lifecycle hooks; replacement of scattered `master_loop` locals; logging of transitions, fast-forwards, stale rejections.
 - Final `MasterState` message API (§4e) and migration path (§7c).
 
@@ -379,9 +379,9 @@ Optional: run `mvp-modules/forked_assistant/test/track2_pipeline_harness.py` or 
 
 ---
 
-3. **Introduce MasterState.** Build the class using the shared protocol for phase tracking and VAD validation. Unit test with the same synthetic sequences.
-4. **Wire into master_loop.** Replace `processing`, `wake_pos`, `capture` locals with state object attributes. Wire `on_*` methods into the existing if/elif message handlers.
-5. **Add fast-forward side-effects.** Capture session teardown on skipped `capture` exit. Verify with a forced fast-forward scenario (e.g. kill the cognitive loop mid-flight).
-6. **Remove raw STATE_CHANGED handler.** All state messages go through the state object. The if/elif for `STATE_CHANGED` becomes a one-liner that delegates to `state.on_state_changed()`.
+3. **Introduce MasterState.** ✅ `master_state.py` + `test_master_state.py` (`exit_phases_for_belief_update` in `phase_protocol.py` for ordered exit hooks).
+4. **Wire into master_loop.** ✅ `MasterState` replaces scattered locals; `STATE_CHANGED` delegates to `on_state_changed`.
+5. **Add fast-forward side-effects.** ✅ Capture teardown via `_teardown_capture_if_live` on `capture` exit hooks (and wake_listen entry). Pi stress (cognitive blocked + stale backlog) still worth a manual run.
+6. **Remove raw STATE_CHANGED handler.** ✅ One-liner delegation (logging inside `MasterState`).
 
 Each step is independently testable and deployable.

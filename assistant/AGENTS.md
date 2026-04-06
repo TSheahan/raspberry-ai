@@ -14,7 +14,9 @@ Parent context: [mvp-modules/forked_assistant/AGENTS.md](../mvp-modules/forked_a
 | [recorder_process.py](recorder_process.py) | Recorder subprocess entry: Pipecat pipeline, ring buffer writer, shutdown protocol toward master. |
 | [recorder_state.py](recorder_state.py) | `RecorderState` base: phase hooks for wake/capture/idle (shared with harnesses). |
 | [phase_protocol.py](phase_protocol.py) | Shared phase vocabulary + `classify_transition()` ([master_state_spec.md](../mvp-modules/forked_assistant/spec/master_state_spec.md) §5a); used by `RecorderState.set_phase()`. |
+| [master_state.py](master_state.py) | `MasterState`: belief from `STATE_CHANGED`, VAD gating, capture teardown on phase exits ([master_state_spec.md](../mvp-modules/forked_assistant/spec/master_state_spec.md) §4). |
 | [test_phase_protocol.py](test_phase_protocol.py) | Runnable checks: `python assistant/test_phase_protocol.py`. |
+| [test_master_state.py](test_master_state.py) | Runnable checks: `python assistant/test_master_state.py`. |
 | [audio_shm_ring.py](audio_shm_ring.py) | SharedMemory ring layout, `AudioShmRingReader` / `AudioShmRingWriter` for audio spans. |
 | [logging_setup.py](logging_setup.py) | Shared loguru setup for master and recorder. |
 

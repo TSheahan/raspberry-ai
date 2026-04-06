@@ -48,6 +48,7 @@ from deepgram.core.events import EventType
 
 from logging_setup import configure_logging
 from agent_session import AgentSession, CursorAgentSession, AgentError
+from master_state import MasterState
 from recorder_process import recorder_child_entry
 from tts_backends import TTSBackend, CartesiaTTS, ElevenLabsTTS, DeepgramTTS
 from audio_shm_ring import (
@@ -273,9 +274,7 @@ def master_loop(pipe, shm: SharedMemory, child: Process) -> None:
     if _TTS_BACKEND not in _TTS_BACKENDS:
         raise RuntimeError(f"Unknown TTS_BACKEND={_TTS_BACKEND!r}; choose from {list(_TTS_BACKENDS)}")
     tts = _TTS_BACKENDS[_TTS_BACKEND]()
-    processing = False
-    wake_pos = 0
-    capture: _SttCaptureSession | None = None
+    state = MasterState()
 
     msg = pipe.recv()
     if msg["cmd"] != "READY":
@@ -291,51 +290,66 @@ def master_loop(pipe, shm: SharedMemory, child: Process) -> None:
             cmd = msg["cmd"]
 
             if cmd == "STATE_CHANGED":
-                logger.debug("[master] state -> {}", msg["state"])
+                state.on_state_changed(msg["state"])
 
             elif cmd == "WAKE_DETECTED":
-                if processing:
-                    logger.warning("[master] still processing previous utterance, ignoring wake")
+                if not state.on_wake_detected(
+                    msg["write_pos"], msg["score"], msg["keyword"]
+                ):
+                    logger.warning(
+                        "[master] WAKE_DETECTED ignored (processing={} phase={})",
+                        state.processing,
+                        state.phase,
+                    )
                     continue
-                wake_pos = msg["write_pos"]
                 logger.info("[master] WAKE_DETECTED  score={:.3f}  keyword={}",
                             msg["score"], msg["keyword"])
 
                 # Pre-spawn agent (hides startup latency behind the STT window)
                 # and open Deepgram live session + ring tail concurrently.
                 agent.prepare()
-                capture = _SttCaptureSession()
-                capture.thread = threading.Thread(
+                cap = _SttCaptureSession()
+                state.capture = cap
+                cap.thread = threading.Thread(
                     target=_run_capture,
-                    args=(capture, ring_reader, wake_pos, dg_client),
+                    args=(cap, ring_reader, state.wake_pos, dg_client),
                     daemon=True,
                 )
-                capture.thread.start()
+                cap.thread.start()
                 pipe.send({"cmd": "SET_CAPTURE"})
 
             elif cmd == "VAD_STARTED":
-                logger.info("[master] VAD_STARTED    write_pos={}", msg["write_pos"])
+                if state.on_vad_started(msg["write_pos"]):
+                    logger.info("[master] VAD_STARTED    write_pos={}", msg["write_pos"])
 
             elif cmd == "VAD_STOPPED":
+                if not state.on_vad_stopped(msg["write_pos"]):
+                    logger.debug(
+                        "[master] VAD_STOPPED ignored (phase={} vad_speaking={})",
+                        state.phase,
+                        state.vad_speaking,
+                    )
+                    continue
                 logger.info("[master] VAD_STOPPED    write_pos={}", msg["write_pos"])
 
                 # Stop the ring tail and wait for Deepgram to finalize.
-                if capture is not None:
-                    capture.stop_event.set()
-                    if capture.thread is not None:
-                        capture.thread.join(timeout=5)
+                cap = state.capture
+                if cap is not None:
+                    cap.stop_event.set()
+                    if cap.thread is not None:
+                        cap.thread.join(timeout=5)
 
-                transcript = capture.get_transcript() if capture else ""
-                capture = None
+                transcript = cap.get_transcript() if cap else ""
+                state.capture = None
 
                 pipe.send({"cmd": "SET_IDLE"})
-                processing = True
+                state.processing = True
                 try:
                     cognitive_loop(transcript, agent, tts)
                 except Exception as exc:
                     logger.error("cognitive loop error: {}", exc)
                 finally:
-                    processing = False
+                    state.processing = False
                     try:
                         pipe.send({"cmd": "SET_WAKE_LISTEN"})
                     except (BrokenPipeError, OSError):
@@ -352,10 +366,10 @@ def master_loop(pipe, shm: SharedMemory, child: Process) -> None:
     finally:
         agent.close()
         tts.close()
-        if capture is not None:
-            capture.stop_event.set()
-            if capture.thread is not None:
-                capture.thread.join(timeout=3)
+        if state.capture is not None:
+            state.capture.stop_event.set()
+            if state.capture.thread is not None:
+                state.capture.thread.join(timeout=3)
 
 
 # ---------------------------------------------------------------------------
