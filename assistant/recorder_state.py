@@ -36,6 +36,8 @@ import numpy as np
 from logging_setup import TRACE
 from loguru import logger
 
+from phase_protocol import TransitionKind, classify_transition, validate_phase
+
 
 class RecorderState:
     """Central state object for the recorder child process.
@@ -51,7 +53,7 @@ class RecorderState:
             pipe: multiprocessing.Connection to master, or None (stub-safe).
             shm:  multiprocessing.shared_memory.SharedMemory, or None.
         """
-        self._phase             = "dormant"   # "dormant" | "wake_listen" | "capture" | "idle"
+        self._phase             = "dormant"   # legal names: phase_protocol.PHASES
         self._write_pos         = 0           # monotonic byte offset; updated by write_audio()
         self._vad_frame_count   = 0           # frames fed to Silero this capture session
         self._total_frame_count = 0           # all audio frames since process start
@@ -129,7 +131,19 @@ class RecorderState:
         """
         old_phase = self._phase
 
-        if old_phase == new_phase:
+        if not validate_phase(new_phase):
+            logger.error("[state] rejected unknown phase: {!r}", new_phase)
+            return
+
+        t = classify_transition(old_phase, new_phase)
+        if t.kind == TransitionKind.STALE:
+            logger.warning(
+                "[state] rejected illegal transition {} → {}",
+                old_phase,
+                new_phase,
+            )
+            return
+        if t.kind == TransitionKind.NOOP:
             self.signal_state_changed()
             return
 

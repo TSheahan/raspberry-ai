@@ -1,9 +1,40 @@
 # Master-side state object — design specification
 
 **Date:** 2026-04-06
-**Status:** Design brief (not yet implemented)
+**Status:** Design brief — **Phase A (inter-process contract) signed off 2026-04-06** (§5a + §5d); Phase B (intra-process) ready to finalize. Not yet implemented.
 **Parent:** [interface_spec.md](./interface_spec.md), [recorder_state_spec.md](./recorder_state_spec.md)
 **Implements in:** `assistant/voice_assistant.py` (new class, replaces scattered locals in `master_loop`)
+
+---
+
+## 0. Foundational model and design sequencing
+
+### 0a. State as an inter-process contract
+
+State tracking is not “a master refactor” with a child implementation detail on the side. It is **foundationally a state contract between the recorder child and the master process**: the same phase vocabulary, cycle order, transition rules, and validity of events/commands apply to both ends of the pipe. Each side embodies that contract in a **state object** — `RecorderState` on the child (authoritative phase, hardware side-effects) and `MasterState` on the master (believed phase, software side-effects). The objects are asymmetric in *who drives transitions* and *what side-effects run*, but they must agree on the **shared rules** or the system drifts into the stale-echo and ordering bugs described in §2.
+
+### 0b. Strict sequencing (gated progression)
+
+Design work is **strictly sequenced**:
+
+| Phase | Scope | Gate |
+|-------|--------|------|
+| **A — Inter-process contract** | Phase names, cycle order, transition classification (`forward` / `cycle_reset` / `stale` / `noop`), which events are legal in which phase, command ↔ confirmation mapping, shutdown sub-protocol. Expressed in spec + ideally one shared code module (`phase_protocol.py` or equivalent). **No** commitment to Python method names on either class beyond what is needed to name the contract. | **Complete — signed off 2026-04-06** (§5a + §5d accepted as the contract boundary; §5b–§5c remain supporting material). |
+| **B — Intra-process interfaces** | `MasterState.on_*` dispositions, `RecorderState` hook shapes, fast-forward side-effect ordering, resource fields on the master object, migration steps in `master_loop` / `set_phase()`. | **Open** — may now be finalized and implemented against §5. |
+
+**Rule:** §4 (master message API), §7c (migration wiring), and process-local hook lists may be treated as **authoritative design targets** for Phase B. The **contract in §5** (especially §5a, §5d) remains the foundation; if it changes, Phase B must be revisited.
+
+### 0c. What “fully defined” means for Phase A
+
+Phase A is done when all of the following are settled (see §5 for the body of the contract). **Satisfied 2026-04-06** (sign-off on §5a + §5d as the normative contract; §5b–§5c are explanatory).
+
+- Legal **phase vocabulary** and **cycle order** (including `dormant` vs the repeating `wake_listen` → `capture` → `idle` loop).
+- **Transition rules** identical on both sides (same classifier semantics).
+- **Event validity by phase** (`WAKE_DETECTED`, `VAD_*` constraints).
+- **Command–confirmation pairs** (and shutdown sequence) aligned with [interface_spec.md](./interface_spec.md).
+- Agreement on **how the shared rules are enforced in code** (minimum: shared module with `classify_transition()`; optional heavier patterns deferred).
+
+Phase A cleared **2026-04-06**; §4 and §7 are no longer provisional on account of the inter-process gate.
 
 ---
 
@@ -74,7 +105,9 @@ The child's `signal_state_changed()` fires on every `set_phase()` call, includin
 
 ---
 
-## 4. Design requirements
+## 4. Design requirements (Phase B — intra-process)
+
+**Dependency:** Finalize §5 (inter-process contract) and obtain explicit agreement before locking the APIs and field lists below. Until then, use this section for alignment and test planning only.
 
 ### 4a. Central state object
 
@@ -169,9 +202,11 @@ Teardown of phase-bound resources happens in the side-effect methods (§4c), not
 
 ---
 
-## 5. Shared contract between RecorderState and MasterState
+## 5. Shared inter-process contract (Phase A — gate this first)
 
-The two state objects sit on opposite ends of the same pipe, but they depend on the same ground truth: the phase model and the event protocol. This contract is a strict subset of what either side does — just four phase names and four transition rules. No side-effects, no resource lifecycle, no hardware, no async. It is the simplest layer in the system and the foundation that everything else is derived from: the child adds hardware side-effects on top of it, the master adds software side-effects and belief tracking on top of it, but neither layer can be correct if the foundation diverges.
+This section **is** the cross-process state contract. The two state objects sit on opposite ends of the same pipe; they depend on the same ground truth: the phase model and the event protocol. The contract is a strict subset of what either side does — phase names, cycle order, transition classification, event legality, command–confirmation pairing. No side-effects, no resource lifecycle, no hardware, no async. It is the simplest layer and the foundation everything else derives from: the child adds hardware side-effects on top of it, the master adds software side-effects and belief tracking on top of it, but neither layer can be correct if the foundation diverges.
+
+**Phase A sign-off (2026-04-06):** §5a and §5d accepted as fully defining the inter-process state behavior for this effort. Proceed to finalize and implement §4, §6–§7 (Phase B) against §5.
 
 Today the contract is implicit — it exists only in `interface_spec.md` as prose and in the coincidental agreement between `recorder_state.py`'s `set_phase()` and the if/elif chain in `master_loop`. If someone adds a phase, renames an event, or changes the transition order on one side, nothing forces the other side to notice.
 
@@ -214,6 +249,39 @@ These four rules are identical on both sides. They should be defined once.
 | `SET_DORMANT` | `STATE_CHANGED(dormant)` |
 | `SHUTDOWN` | `SHUTDOWN_COMMENCED` → `SHUTDOWN_FINISHED` |
 
+**How to read this next to child-originated ground truth (wake, VAD).** The pipe carries two different kinds of child→master facts; only one of them is “commanded then confirmed”:
+
+| Kind | Who decides | What it means |
+|------|-------------|----------------|
+| **Phase** (`STATE_CHANGED`) | Master **requests** a mode with `SET_*`; child **implements** it (stream layout, OWW vs Silero, etc.) and **reports** the phase it has actually entered. | The child is authoritative on *what phase it is in right now*. `STATE_CHANGED` is not a prediction — it is the child’s assertion that its recorder state machine has committed to that phase after handling the command (or an equivalent internal transition that still results in that phase). |
+| **Events** (`WAKE_DETECTED`, `VAD_*`) | Only the child **observes** the mic + models. The master never commands “detect wake now.” | These are **telemetry**: “this happened while I was in the phase I was in.” They are ground truth for *detection*, not substitutes for `STATE_CHANGED`. |
+
+So **§5a’s transition rules apply to phase names** — comparing previous phase to next phase when processing `STATE_CHANGED` (and when the child validates `set_phase`). They do **not** describe “wake word transitions the system from wake_listen to capture.” The wake word does **not** carry a phase on the wire. The causal story in the normal turn is:
+
+1. Child is in `wake_listen` (per last `STATE_CHANGED` and local `RecorderState`).
+2. Child emits `WAKE_DETECTED` — ground truth that OWW fired at `write_pos`.
+3. Master may apply policy (ignore if busy, etc.); if it accepts, it sends `SET_CAPTURE`.
+4. Child enters `capture`, runs Silero, and sends `STATE_CHANGED(capture)` — ground truth of **mode**, not of wake.
+
+The master’s **belief** about phase should track (2) vs (4) separately from **events**: you can receive `WAKE_DETECTED` while still believing the child is in `wake_listen` until `STATE_CHANGED(capture)` arrives — or, depending on timing, process a backlog where `STATE_CHANGED` and events are interleaved. The contract says **which events are legal in which phase** (child when sending, master when accepting); the command–confirmation table says **how phase changes are agreed** across the boundary.
+
+#### Worked example: `wake_listen` → `capture` (phase alignment)
+
+| Step | Child | Pipe | Master |
+|------|--------|------|--------|
+| 1 | In `wake_listen` (OWW on, ring writing). | → `WAKE_DETECTED` `{ write_pos, score, keyword }` | `on_wake_detected` / policy: accept if believed phase is `wake_listen` and not busy. |
+| 2 | Still `wake_listen` until command handled. | ← `SET_CAPTURE` | Sends command; may start master-local STT / ring-tail (Phase B policy — not required for phase contract). |
+| 3 | `set_phase(capture)` → Silero on, OWW off, etc. | → `STATE_CHANGED` `{ state: "capture" }` | Drains when ready; must not assume this is the next message after `SET_CAPTURE`. |
+| 4 | In `capture`; may emit `VAD_*` only from here. | | `on_state_changed("capture")`: forward from `wake_listen` → belief `capture`. **Inter-process capture commenced** = child committed + master belief updated. |
+
+Ring writes are already active before wake; wake supplies `write_pos`, not a separate “start ring” phase transition.
+
+#### VAD series vs phase changes
+
+`VAD_STARTED` / `VAD_STOPPED` carry **no phase**. While the child stays in `capture`, it may emit **many** VAD pairs (silence gaps, Silero retriggering, future multi-segment dictation). None of those messages change phase on their own.
+
+**Phase** changes only when the master sends a `SET_*` and the child confirms with `STATE_CHANGED`. The master therefore decides **when** (and in a future design, **whether**) those VAD events lead to **sending** the commands that end `capture` (e.g. `SET_WAKE_LISTEN` after tearing down STT, or `SET_IDLE` first per pipeline policy). That decision logic is **master policy** (§5d), not part of the shared transition classifier — but the model explicitly allows “many VAD events, one eventual phase exit driven by master timing.”
+
 ### 5b. What differs between the two sides
 
 While the contract above is shared, the two state objects are not symmetric:
@@ -252,16 +320,17 @@ The shared contract does not dictate:
 
 ## 6. Scope and non-goals
 
-### In scope
+### Phase A (inter-process) — signed off 2026-04-06
 
-- **Shared phase protocol** — a small module (`phase_protocol.py` or similar) defining the phase vocabulary, cycle order, and `classify_transition()` function (§5c option 1). Imported by both `RecorderState` and `MasterState`.
-- **Central `MasterState` class** in `voice_assistant.py` (or a new `master_state.py` if size warrants).
-- Phase tracking with forward/stale/fast-forward logic, using the shared protocol.
-- VAD event validation.
-- Resource lifecycle hooks for capture session teardown.
-- Replacement of scattered locals (`processing`, `wake_pos`, `capture`) with state object attributes.
-- Logging of phase transitions, fast-forwards, stale rejections.
-- **Retrofit `RecorderState`** to import and use the shared phase protocol for its transition validity checks, replacing the inline logic in `set_phase()`.
+- **Shared phase protocol spec** — §5a + §5d are the agreed contract; §5b–§5c support implementation choices. Stays aligned with [interface_spec.md](./interface_spec.md) for wire messages.
+- **Shared code module** (recommended) — `phase_protocol.py` (or similar): `PHASES`, cycle order, `classify_transition()` (§5c option 1). No requirement to wire it into both processes in the same commit as long as the **rules** are agreed.
+
+### Phase B (intra-process) — in scope after Phase A sign-off
+
+- **`phase_protocol.py` + `RecorderState` retrofit** — implemented 2026-04-06 (`classify_transition` gate in `set_phase()`). **User checkpoint at §7c** before `MasterState`.
+- **Central `MasterState` class** in `voice_assistant.py` (or `master_state.py` if size warrants).
+- Phase belief tracking with forward/stale/fast-forward logic; VAD validation; resource lifecycle hooks; replacement of scattered `master_loop` locals; logging of transitions, fast-forwards, stale rejections.
+- Final `MasterState` message API (§4e) and migration path (§7c).
 
 ### Not in scope (future)
 
@@ -272,7 +341,7 @@ The shared contract does not dictate:
 
 ---
 
-## 7. Implementation notes
+## 7. Implementation notes (Phase B)
 
 ### 7a. File placement
 
@@ -291,8 +360,25 @@ The state object is pure logic (no I/O, no pipe access). It can be unit-tested w
 
 ### 7c. Migration path
 
-1. **Shared protocol.** Create `phase_protocol.py` with `PHASES`, `PHASE_ORDER`, `classify_transition()`. Unit test the classifier with the synthetic sequences from §7b.
-2. **Retrofit RecorderState.** Import the shared protocol into `recorder_state.py`. Replace inline transition logic in `set_phase()` with `classify_transition()`. Verify no behaviour change (existing tests, manual smoke).
+Steps 1–2 align with **Phase A** (contract in code + child parity). Steps 3–6 are **Phase B** (master object + loop wiring) and assume Phase A sign-off.
+
+1. **Shared protocol.** Create `phase_protocol.py` with `PHASES`, `PHASE_CYCLE`, `classify_transition()`. Unit test the classifier with the synthetic sequences from §7b.
+2. **Retrofit RecorderState.** Import the shared protocol into `recorder_state.py`. Gate `set_phase()` with `classify_transition()` (reject `STALE` and unknown phases). Verify no behaviour change on legal paths (harness / Pi smoke).
+
+---
+
+### User checkpoint — after steps 1–2
+
+**Stop here for sign-off before MasterState (step 3).** Deliverables:
+
+- [`assistant/phase_protocol.py`](../../assistant/phase_protocol.py) — contract constants + `classify_transition()`.
+- [`assistant/recorder_state.py`](../../assistant/recorder_state.py) — uses the classifier; illegal transitions log and no-op without changing `_phase`.
+- Quick verification: `python assistant/test_phase_protocol.py` from repo root (classifier always runs; `RecorderState` stale/noop checks run when `numpy` is available, e.g. Pi venv).
+
+Optional: run `mvp-modules/forked_assistant/test/track2_pipeline_harness.py` or Pi `test_harness.py` if you want hardware confidence on legal command sequences.
+
+---
+
 3. **Introduce MasterState.** Build the class using the shared protocol for phase tracking and VAD validation. Unit test with the same synthetic sequences.
 4. **Wire into master_loop.** Replace `processing`, `wake_pos`, `capture` locals with state object attributes. Wire `on_*` methods into the existing if/elif message handlers.
 5. **Add fast-forward side-effects.** Capture session teardown on skipped `capture` exit. Verify with a forced fast-forward scenario (e.g. kill the cognitive loop mid-flight).
