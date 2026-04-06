@@ -20,12 +20,12 @@ Test Ctrl+C at any point — shutdown must be clean (no hang, no reboot).
 import asyncio
 import os
 import sys
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'src'))
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..', '..', 'assistant'))
 from multiprocessing import Pipe, Process
 from multiprocessing.shared_memory import SharedMemory
 
 from recorder_state import RecorderState
-from ring_buffer import (
+from audio_shm_ring import (
     FRAME_BYTES, FRAME_DURATION, SAMPLE_RATE, SAMPLE_WIDTH,
     SHM_NAME, SHM_SIZE,
     RingBufferReader, RingBufferWriter,

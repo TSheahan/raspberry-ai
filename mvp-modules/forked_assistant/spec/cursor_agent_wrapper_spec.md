@@ -8,7 +8,7 @@
 
 ## 1. Purpose
 
-Interpose a **small, version-controlled program** on the path from `master.py` / `CursorAgentSession` to the real Cursor CLI binary. Today `voice` runs (conceptually):
+Interpose a **small, version-controlled program** on the path from `voice_assistant.py` / `CursorAgentSession` to the real Cursor CLI binary. Today `voice` runs (conceptually):
 
 `sudo -u agent -H -- <AGENT_BIN> <cursor flags…>`
 
@@ -86,7 +86,7 @@ Add a **sparse** top-level directory at the repo root (sibling to `mvp-modules/`
 | **Argv vs secrets** | The **user utterance is not on argv** — `CursorAgentSession` passes the transcript on **stdin**; argv is Cursor flags and paths only. **Risk from logging argv is therefore low** (no interactive paste into shell args). Still **do not** log environment blobs that may hold API keys. **Caller annotation:** documented on `CursorAgentSession` and in `agent_session_spec.md` so future changes do not move sensitive text onto argv. |
 | **Rotation** | `logrotate` drop-in — see **profiling gap** in `profiling-pi/cursor-agent-wrapper-provisioning.md` (wanted vs current). |
 | **Content** | ISO-ish timestamp, events: `start`, `spawn_real`, `signal_forward`, `fatal` (missing binary, spawn failure) — **no** API keys; cap argv string length in logs if desired |
-| **Python stderr** | Unchanged: master reads CLI stderr via **`stderr=subprocess.PIPE`**; supervising wrapper forwards child stderr to that pipe |
+| **Python stderr** | Unchanged: `CursorAgentSession` reads CLI stderr via **`stderr=subprocess.PIPE`**; supervising wrapper forwards child stderr to that pipe |
 
 **Truncate vs append:** Always **append**; never truncate per invocation.
 
@@ -98,7 +98,7 @@ Two distinct **voice → agent** touch points:
 
 | Touch point | Mechanism | Purpose |
 |-------------|-----------|---------|
-| **Runtime invoke** | `voice ALL=(agent) NOPASSWD: /home/agent/artifacts/cursor-agent-wrapper` | `master.py` runs `sudo -u agent -H -- <AGENT_BIN> …`; **only** the wrapper path is allowed — not the raw CLI if policy is wrapper-only. |
+| **Runtime invoke** | `voice ALL=(agent) NOPASSWD: /home/agent/artifacts/cursor-agent-wrapper` | `voice_assistant.py` runs `sudo -u agent -H -- <AGENT_BIN> …`; **only** the wrapper path is allowed — not the raw CLI if policy is wrapper-only. |
 | **Deposit / sync** | `voice ALL=(ALL) NOPASSWD: <fixed installer script path>` | **`voice`** runs the installer (after `git pull`) to **copy** `agent-artifacts/cursor-agent-wrapper` from the **voice checkout** into **`/home/agent/artifacts/`**, `chown agent:agent`. This is how repo updates reach **agent-owned** bytes without giving `voice` write access to `/home/agent` except through that one script. |
 
 **Today (pre-wrapper):**  
@@ -124,7 +124,7 @@ Normative step-by-step lives in **`profiling-pi/cursor-agent-wrapper-provisionin
 
 ## 9. Interaction with `CursorAgentSession` / `AGENT_BIN`
 
-- `master.py` continues: `CursorAgentSession(..., agent_bin=_AGENT_BIN)` with `_AGENT_BIN` from env.
+- `voice_assistant.py` continues: `CursorAgentSession(..., agent_bin=_AGENT_BIN)` with `_AGENT_BIN` from env.
 - `.env` sets `AGENT_BIN=/home/agent/artifacts/cursor-agent-wrapper`.
 - Wrapper resolves the real binary per §4.
 - No change to flags: `-p`, `stream-json`, `--stream-partial-output`, `--force`, `--yolo`, `--trust`, `--workspace`, `--model`, optional `--resume`.

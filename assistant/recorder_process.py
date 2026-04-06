@@ -1,5 +1,5 @@
 """
-recorder_child.py — Complete recorder subprocess (EU-3d merge).
+recorder_process.py — Complete recorder subprocess (EU-3d merge).
 
 Runs in a forked child process pinned to core 0. Owns the microphone via
 Pipecat + PyAudio, runs OWW wake word detection and Silero VAD, writes
@@ -30,7 +30,7 @@ import numpy as np
 from collections import defaultdict, deque
 from multiprocessing.shared_memory import SharedMemory
 
-from log_config import active_level_no, configure_logging, PERF, TRACE
+from logging_setup import active_level_no, configure_logging, PERF, TRACE
 from loguru import logger
 
 from openwakeword.model import Model as OWWModel
@@ -50,7 +50,7 @@ from pipecat.audio.vad.vad_analyzer import VADParams
 from pipecat.audio.vad.vad_controller import VADController
 
 from recorder_state import RecorderState
-from ring_buffer import RingBufferWriter
+from audio_shm_ring import RingBufferWriter
 
 def _duty_cycle_enabled() -> bool:
     """True when the active log level is at or below PERF (8).

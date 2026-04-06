@@ -33,7 +33,7 @@ import weakref
 
 import numpy as np
 
-from log_config import TRACE
+from logging_setup import TRACE
 from loguru import logger
 
 
@@ -199,7 +199,7 @@ class RecorderState:
         """Start the PyAudio input stream.
 
         Retries for up to 200ms to tolerate the startup race: READY is sent
-        from recorder_child before runner.run() is called, so the first
+        from recorder_process before runner.run() is called, so the first
         SET_WAKE_LISTEN can arrive before _in_stream exists. In practice the
         stream is ready within a few ms of the first audio frame.
         """

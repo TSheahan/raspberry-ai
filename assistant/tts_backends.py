@@ -1,5 +1,5 @@
 """
-tts.py — TTS backends for forked_assistant (step 8).
+tts_backends.py — TTS backends for the voice assistant runtime (step 8).
 
 Architecture
 ------------
@@ -25,7 +25,7 @@ on Windows for dev. PortAudio (PyAudio) causes tearing on bcm2835 due to its
 internal callback thread getting descheduled on Pi 4 ARM — confirmed in
 tts_evaluation session 2 (2026-04-05). See _AudioOut class.
 
-Usage (from master.py):
+Usage (from voice_assistant.py):
     tts = CartesiaTTS()               # primary backend; defaults to Allie, speed 0.85
     tts.warm()                        # pre-establish wss (reuses socket for play())
     tts.play(agent.run(transcript))   # same WebSocket; one context_id per sentence chunk
@@ -119,14 +119,14 @@ class _AudioOut:
 class TTSBackend(ABC):
     """Abstract base for all TTS backends.
 
-    master.py depends only on this interface:
+    voice_assistant.py depends only on this interface:
         tts.play(agent.run(transcript))
         tts.close()
 
     Any implementation that accepts an Iterator[str] of sentence-boundary-aligned
     chunks and plays audio through ALSA device 0 (bcm2835, S16_LE) satisfies the
     contract. Device, sample rate, and encoding are backend responsibilities —
-    master.py does not know or care.
+    voice_assistant.py does not know or care.
 
     Audio output uses pyalsaaudio (direct ALSA) on Linux; PyAudio fallback on
     Windows for dev. See _AudioOut above.
@@ -198,7 +198,7 @@ class DeepgramTTS(TTSBackend):
     long-utterance WebSocket behaviour) concern **Cartesia**, the default
     backend. This class is plain REST per chunk; it does not use the Deepgram
     live transcription socket. Deepgram STT KeepAlive / ``NET-0001`` / reconnect
-    notes apply to ``master.py`` capture only — see Deepgram docs for streaming
+    notes apply to ``voice_assistant.py`` capture only — see Deepgram docs for streaming
     STT, not for debugging Cartesia or this REST path.
 
     One API call per sentence chunk. Audio is returned as linear16 PCM and
@@ -761,7 +761,7 @@ def _monotonic() -> float:
 
 
 # ---------------------------------------------------------------------------
-# Standalone smoke test — python tts.py [--backend cartesia|elevenlabs|deepgram] [TEXT]
+# Standalone smoke test — python tts_backends.py [--backend cartesia|elevenlabs|deepgram] [TEXT]
 # ---------------------------------------------------------------------------
 
 if __name__ == "__main__":

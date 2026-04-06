@@ -32,7 +32,7 @@ Usage (on Pi with ReSpeaker):
 """
 
 import os, sys
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'src'))
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..', '..', 'assistant'))
 
 import asyncio
 import signal

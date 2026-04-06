@@ -3,10 +3,10 @@ agent_session.py — Agent subprocess abstraction (EU-6).
 
 Two-layer design:
 
-  AgentSession        — abstract base; defines the interface master.py uses
+  AgentSession        — abstract base; defines the interface voice_assistant.py uses
   CursorAgentSession  — Cursor CLI implementation (~/.local/bin/agent)
 
-master.py integration (EU-5 Pi session):
+voice_assistant.py integration (EU-5 Pi session):
 
     agent = CursorAgentSession(workspace=Path(AGENT_WORKSPACE))
 
@@ -58,7 +58,7 @@ class AgentSession(ABC):
     """Abstract interface for an agent subprocess session.
 
     Subclasses own the subprocess lifecycle and the output parsing.
-    master.py only calls prepare(), run(), and close().
+    voice_assistant.py only calls prepare(), run(), and close().
     """
 
     def __init__(self, resume_window_secs: float = 300.0) -> None:

@@ -1,19 +1,19 @@
 # Agent Session Specification
 
 **Date:** 2026-04-04
-**Status:** Design spec — `src/agent_session.py` implements this contract
+**Status:** Design spec — `assistant/agent_session.py` implements this contract
 **Parent:** `forked_assistant/spec/implementation_framework.md` (EU-6)
 
 ---
 
 ## Overview
 
-`agent_session.py` provides a two-layer abstraction for the agent subprocess that drives the cognitive response path in `master.py`:
+`agent_session.py` provides a two-layer abstraction for the agent subprocess that drives the cognitive response path in `voice_assistant.py`:
 
-- **`AgentSession`** — abstract base class. Defines the interface `master.py` uses. Independent of any specific agent backend.
+- **`AgentSession`** — abstract base class. Defines the interface `voice_assistant.py` uses. Independent of any specific agent backend.
 - **`CursorAgentSession(AgentSession)`** — Cursor CLI implementation. Uses `~/.local/bin/agent` with `stream-json` output. Proven on Pi ARM64 (2026-04-04 smoke test).
 
-The interchangeability layer is the primary motivation for the abstraction: at the current rate of AI tooling change, the backend (Cursor CLI, Claude CLI, direct API, future alternatives) must be swappable without touching `master.py`.
+The interchangeability layer is the primary motivation for the abstraction: at the current rate of AI tooling change, the backend (Cursor CLI, Claude CLI, direct API, future alternatives) must be swappable without touching `voice_assistant.py`.
 
 ---
 
@@ -48,7 +48,7 @@ Feed the completed transcript to the pre-spawned process; iterate word-boundary-
 
 #### `close() -> None`
 
-Clean up any remaining subprocess state. Called by `master.py` on shutdown. Safe to call if no process is running.
+Clean up any remaining subprocess state. Called by `voice_assistant.py` on shutdown. Safe to call if no process is running.
 
 ### Properties
 
@@ -69,7 +69,7 @@ Raised by `run()` on:
 - `result.is_error == True` in the stream output
 - Pipe broken mid-stream (subprocess crash)
 
-`master.py` catches `AgentError`, logs it, and continues to the next wake cycle without retrying.
+`voice_assistant.py` catches `AgentError`, logs it, and continues to the next wake cycle without retrying.
 
 ---
 
@@ -206,13 +206,13 @@ prepare() called
 
 `resume_window_secs` defaults to 300s (5 min) from `AGENT_RESUME_WINDOW_SECS` env var. Setting to `0` disables resume entirely (always fresh). No upper bound is enforced — very large values effectively make sessions permanent until the window is explicitly reduced.
 
-**Forward extension (not in scope for EU-6):** A `FORCE_NEW_SESSION` pipe command from master could force a fresh start on demand (e.g., user explicitly says "start over"). This would call `close()` on the current session and clear `session_id` before the next `prepare()`.
+**Forward extension (not in scope for EU-6):** A `FORCE_NEW_SESSION` pipe command from the voice assistant process could force a fresh start on demand (e.g., user explicitly says "start over"). This would call `close()` on the current session and clear `session_id` before the next `prepare()`.
 
 ---
 
-## Integration with `master.py` (EU-5 Pi Session)
+## Integration with `voice_assistant.py` (EU-5 Pi session)
 
-The changes to `master.py` that wire in `AgentSession` are deferred to the EU-5 Pi session. The interface is designed for a clean drop-in:
+The changes to `voice_assistant.py` that wire in `AgentSession` are deferred to the EU-5 Pi session. The interface is designed for a clean drop-in:
 
 ```python
 # At startup:
@@ -229,7 +229,7 @@ for text_chunk in agent.run(transcript):
 agent.close()
 ```
 
-`cognitive_loop(audio_bytes, dg_client)` is retired and replaced by direct `agent.run(transcript)` iteration in the WAKE/VAD event handler. The `transcribe()`, `run_claude()`, and `stub_claude()` functions in `master.py` are removed.
+`cognitive_loop(audio_bytes, dg_client)` is retired and replaced by direct `agent.run(transcript)` iteration in the WAKE/VAD event handler. The `transcribe()`, `run_claude()`, and `stub_claude()` functions in `voice_assistant.py` are removed.
 
 ---
 
@@ -244,6 +244,6 @@ Other backends implement `AgentSession` with the same interface:
 | _(future)_ | Direct Anthropic API | No subprocess; async iterator |
 | _(future)_ | Alternative model CLI | Same base, different binary |
 
-`master.py` only imports and instantiates the concrete class. Swapping backends is a one-line change in the master configuration block.
+`voice_assistant.py` only imports and instantiates the concrete class. Swapping backends is a one-line change in the voice assistant configuration block.
 
 **Deployment note:** On Pi, `AGENT_BIN` may point at a **wrapper** that supervises the real Cursor CLI; the argv contract in §Subprocess Invocation is unchanged. See `cursor_agent_wrapper_spec.md`.

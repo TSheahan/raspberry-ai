@@ -1,5 +1,5 @@
 """
-ring_buffer.py — Shared-memory ring buffer for recorder→master audio transfer.
+audio_shm_ring.py — Shared-memory ring buffer for recorder→master audio transfer.
 
 Memory layout (HEADER_SIZE + RING_SIZE bytes):
 
@@ -21,7 +21,7 @@ Read protocol:  read write_pos first; data is valid if (write_pos - start) <= RI
 import struct
 from multiprocessing.shared_memory import SharedMemory
 
-from log_config import TRACE
+from logging_setup import TRACE
 from loguru import logger
 
 # --- Layout ---

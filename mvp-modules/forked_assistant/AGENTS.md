@@ -16,6 +16,8 @@ This design solves the single-process shutdown crash documented in `archive/step
 `profiling-pi/venv.md` (authoritative). `mvp-modules/archive/requirements.txt` is
 **developer-only** (IDE import resolution); it is not the Pi provisioning recipe.
 
+Runtime Python (master + recorder child) lives in **repo-root `assistant/`** — see [`../../assistant/AGENTS.md`](../../assistant/AGENTS.md) for the module index. This tree holds **spec**, **test**, and **archive** for the forked-assistant effort.
+
 ```
 forked_assistant/
 ├── AGENTS.md          ← you are here
@@ -27,14 +29,6 @@ forked_assistant/
 │   ├── agent_session_spec.md      ← EU-6: AgentSession abstract interface + CursorAgentSession contract
 │   ├── cursor_agent_wrapper_spec.md ← Cursor CLI shim: logging, sudo path, hooks (design)
 │   └── implementation_framework.md ← EU phasing, session principles, dependency graph (READ FIRST)
-├── src/               ← library code (see src/AGENTS.md for index + agent shutdown analysis)
-│   ├── AGENTS.md                 ← file index; Cursor agent subprocess shutdown notes
-│   ├── ring_buffer.py             ← SharedMemory ring: writer/reader, header format
-│   ├── recorder_state.py         ← RecorderState base class: phase logic, processor hooks
-│   ├── recorder_child.py         ← EU-3d: merged recorder subprocess (RecorderChild + Pipecat pipeline)
-│   ├── agent_session.py          ← EU-6: AgentSession base + CursorAgentSession implementation
-│   ├── tts.py                    ← EU-7: TTSBackend + cloud backends + _AudioOut
-│   └── master.py                 ← EU-5/EU-6/EU-7: streaming STT + agent + TTS
 ├── test/              ← harnesses and smoke tests
 │   ├── smoke_test_shm.py         ← EU-1+EU-2: SharedMemory and ring buffer IPC tests
 │   ├── track1_ipc_harness.py     ← EU-3b: fork + real SHM/pipe, FakeAudioDriver
@@ -54,15 +48,15 @@ forked_assistant/
 | EU | Description | Status |
 |----|-------------|--------|
 | EU-1 | SharedMemory smoke test | Complete (`test/smoke_test_shm.py`) |
-| EU-2 | Ring buffer module | Complete (`src/ring_buffer.py`, tested in smoke_test) |
-| EU-3a | RecorderState base class | Complete (`src/recorder_state.py`) |
+| EU-2 | Ring buffer module | Complete (`assistant/audio_shm_ring.py`, tested in smoke_test) |
+| EU-3a | RecorderState base class | Complete (`assistant/recorder_state.py`) |
 | EU-3b | Track 1: IPC harness (fork + real SHM/pipe, no Pipecat) | Complete (`test/track1_ipc_harness.py`) |
 | EU-3c | Track 2: Pipeline harness (real Pipecat + stub IPC) | Complete (`test/track2_pipeline_harness.py`) |
-| EU-3d | Merge: Track 1 + Track 2 into real recorder child | Complete (`src/recorder_child.py`, `test/test_harness.py`) |
-| EU-4 | Master process — batch mode (STT + Claude) | Complete (`src/master.py`, proven 2026-04-03) |
-| EU-5 | Streaming STT — Deepgram live WebSocket + ring buffer tail | Complete (`src/master.py`, proven 2026-04-04) |
-| EU-6 | Agent module — `AgentSession` abstraction + `CursorAgentSession` (Cursor CLI) | Complete (`src/agent_session.py`, integrated in `src/master.py`, proven 2026-04-04) |
-| EU-7 | TTS — `PiperTTS` wrapper + `master.py` integration | Complete (`src/tts.py`, `src/master.py`, proven 2026-04-04) |
+| EU-3d | Merge: Track 1 + Track 2 into real recorder child | Complete (`assistant/recorder_process.py`, `test/test_harness.py`) |
+| EU-4 | Master process — batch mode (STT + Claude) | Complete (`assistant/voice_assistant.py`, proven 2026-04-03) |
+| EU-5 | Streaming STT — Deepgram live WebSocket + ring buffer tail | Complete (`assistant/voice_assistant.py`, proven 2026-04-04) |
+| EU-6 | Agent module — `AgentSession` abstraction + `CursorAgentSession` (Cursor CLI) | Complete (`assistant/agent_session.py`, integrated in `assistant/voice_assistant.py`, proven 2026-04-04) |
+| EU-7 | TTS — `PiperTTS` wrapper + `voice_assistant.py` integration | Complete (`assistant/tts_backends.py`, `assistant/voice_assistant.py`, proven 2026-04-04) |
 
 EU-3b and EU-3c are **parallel tracks** that can be developed independently. EU-3d merges them.
 
@@ -78,7 +72,7 @@ These are proven failure modes. Do not relax them:
 
 ## Agent Subprocess — Privilege Separation
 
-The Cursor CLI subprocess runs as a dedicated `agent` Linux user via `sudo -u agent -H`. The voice assistant processes (`master.py`, recorder child) run as `user`. The sudoers entry is a single fixed path: on Pi prefer the supervising wrapper at `/home/agent/artifacts/cursor-agent-wrapper` (see `profiling-pi/cursor-agent-wrapper-provisioning.md`); otherwise the raw CLI path `/home/agent/.local/bin/agent`.
+The Cursor CLI subprocess runs as a dedicated `agent` Linux user via `sudo -u agent -H`. The voice assistant processes (`voice_assistant.py`, recorder child) run as `user`. The sudoers entry is a single fixed path: on Pi prefer the supervising wrapper at `/home/agent/artifacts/cursor-agent-wrapper` (see `profiling-pi/cursor-agent-wrapper-provisioning.md`); otherwise the raw CLI path `/home/agent/.local/bin/agent`.
 
 Set `AGENT_USER=agent` in `.env` to enable. Leave unset for dev/local runs (subprocess inherits current user). `AGENT_BIN` and `AGENT_WORKSPACE` must point to `agent`'s home when `AGENT_USER` is active.
 
@@ -86,7 +80,7 @@ Pi provisioning steps: `profiling-pi/agent-user-setup.md`. Design rationale: `ar
 
 ## Import Convention
 
-Test files add `sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'src'))` to resolve `src/` imports. This supports direct execution: `python test/smoke_test_shm.py` from the `forked_assistant/` directory.
+Test files add `sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..', '..', 'assistant'))` to resolve imports from repo-root `assistant/`. This supports direct execution: `python test/smoke_test_shm.py` from the `forked_assistant/` directory.
 
 ## What's Next
 
@@ -96,19 +90,19 @@ PiperTTS was rejected after EU-7 proof run: OOM kill (317 MB RSS + 385 MB swap o
 1 GB Pi) and audio tearing. Cloud TTS evaluation complete (sessions 1–5, 2026-04-05).
 See `archive/tts_evaluation/` for full record.
 
-**Selected backend: Cartesia** (primary). `tts.py` defaults are already set — `CartesiaTTS()`
+**Selected backend: Cartesia** (primary). `tts_backends.py` defaults are already set — `CartesiaTTS()`
 requires no arguments (Allie, speed 0.85). Fallback: ElevenLabs/Matilda. Tertiary:
 Deepgram/Helena. All three implemented as `TTSBackend` subclasses.
 
-**Three changes needed in `master.py` before the Pi run:**
+**Three changes needed in `voice_assistant.py` before the Pi run:**
 
 1. **Swap backend** — replace `PiperTTS` with `CartesiaTTS`:
    ```python
    # remove:
-   from tts import PiperTTS
+   from tts_backends import PiperTTS
    tts = PiperTTS(_PIPER_MODEL_PATH)
    # add:
-   from tts import CartesiaTTS, TTSBackend
+   from tts_backends import CartesiaTTS, TTSBackend
    tts = CartesiaTTS()
    ```
    Update `cognitive_loop` type annotation: `tts: PiperTTS` → `tts: TTSBackend`.
@@ -129,7 +123,7 @@ Deepgram/Helena. All three implemented as `TTSBackend` subclasses.
    on failure.
 
 3. **Load `.env`** — `CARTESIA_API_KEY` (and `ELEVENLABS_API_KEY`) must be present.
-   Confirm `.env` is loaded at master.py startup (already done for `DEEPGRAM_API_KEY`).
+   Confirm `.env` is loaded at `voice_assistant.py` startup (already done for `DEEPGRAM_API_KEY`).
 
 **Pi run validation targets (Phase 3):**
 - Time-to-first-audio < 2s post-VAD_STOPPED
@@ -157,7 +151,7 @@ PiperTTS proven on Pi. First full end-to-end voice turn: "Tell me about the rule
 - Duty cycle: 2/8509 frames over 20ms budget (0.0%) during TTS playback window
 - Clean Ctrl+C from wake_listen; SHUTDOWN_FINISHED → `[master] done` with no reboot
 
-Post-run fix: `_strip_markdown()` added to `tts.py` — agent responses with `**bold**` rendered as "asterisk asterisk" by Piper before the fix.
+Post-run fix: `_strip_markdown()` added to `tts_backends.py` — agent responses with `**bold**` rendered as "asterisk asterisk" by Piper before the fix.
 
 ### EU-5 + EU-6 — complete (2026-04-04)
 
@@ -173,13 +167,13 @@ All EU-5 validation criteria met: Deepgram live WebSocket connects and accumulat
 
 ### EU-4 — complete (2026-04-03)
 
-Master process batch mode (`src/master.py`) proven on Pi across three runs:
+Master process batch mode (`assistant/voice_assistant.py`) proven on Pi across three runs:
 
 - **Run 1:** Audio driver buffer overrun, transcription failed. Root cause: capture span started at VAD_STARTED, discarding utterance onset.
 - **Run 2:** Span start fixed to wake_pos. Transcription succeeded ("Hello?", 1.71s latency). Pi rebooted on Ctrl+C — SIGINT race: child called `task.cancel()` directly, bypassing `stop_stream()`.
 - **Run 3:** Two-phase shutdown protocol implemented. Voice turn complete (score 0.879, 3.12s, "Hello.", 1.82s STT). Clean Ctrl+C shutdown: SHUTDOWN_COMMENCED → stream stopped → pipeline drained → SHUTDOWN_FINISHED → `[master] done`. No reboot. 0/485 frames over budget.
 
-Key changes to `recorder_child.py`: `_initiate_shutdown()` once-only coroutine, SIGINT/SIGTERM/SHUTDOWN all converge to it. Key changes to `master.py`: `shutdown_child()` waits for SHUTDOWN_FINISHED, `master_loop` returns on SHUTDOWN_COMMENCED, `shutdown_child` runs in `finally` on all exit paths. Protocol documented in `interface_spec.md` §3 and `memory/shutdown_and_buffer_patterns.md` Root Cause 4.
+Key changes to `recorder_process.py`: `_initiate_shutdown()` once-only coroutine, SIGINT/SIGTERM/SHUTDOWN all converge to it. Key changes to `voice_assistant.py`: `shutdown_child()` waits for SHUTDOWN_FINISHED, `master_loop` returns on SHUTDOWN_COMMENCED, `shutdown_child` runs in `finally` on all exit paths. Protocol documented in `interface_spec.md` §3 and `memory/shutdown_and_buffer_patterns.md` Root Cause 4.
 
 ### EU-3d — complete (2026-04-02)
 

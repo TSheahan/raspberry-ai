@@ -1,5 +1,5 @@
 """
-master.py — Master process for the forked assistant (EU-5/EU-6/EU-7: streaming + TTS).
+voice_assistant.py — Master process for the forked assistant (EU-5/EU-6/EU-7: streaming + TTS).
 
 Main entry point. Creates SharedMemory and Pipe, spawns the recorder child
 on core 0, then runs a synchronous event loop that:
@@ -18,15 +18,15 @@ STT: Deepgram Nova-3 live WebSocket (Mixed mode — Silero VAD is authoritative
 dispatch trigger; Deepgram streams in parallel and accumulates is_final results).
 Agent: CursorAgentSession (~/.local/bin/agent, stream-json, session continuity).
 TTS: CartesiaTTS (primary), ElevenLabsTTS (fallback), DeepgramTTS (tertiary).
-     Select via TTS_BACKEND env var; unset or empty → cartesia. See tts.py for details.
+     Select via TTS_BACKEND env var; unset or empty → cartesia. See tts_backends.py for details.
 
 Dependencies not in requirements.txt (already installed on Pi venv):
   deepgram-sdk, python-dotenv, cartesia, elevenlabs
 
 Usage (on Pi with ReSpeaker):
-    cd ~/raspberry-ai/mvp-modules/forked_assistant
+    cd ~/raspberry-ai
     source ~/pipecat-agent/venv/bin/activate
-    AGENT_WORKSPACE=~/raspberry-ai python src/master.py
+    AGENT_WORKSPACE=~/raspberry-ai python assistant/voice_assistant.py
 """
 
 import os
@@ -46,11 +46,11 @@ load_dotenv(override=True)
 from deepgram import DeepgramClient
 from deepgram.core.events import EventType
 
-from log_config import configure_logging
+from logging_setup import configure_logging
 from agent_session import AgentSession, CursorAgentSession, AgentError
-from recorder_child import recorder_child_entry
-from tts import TTSBackend, CartesiaTTS, ElevenLabsTTS, DeepgramTTS
-from ring_buffer import (
+from recorder_process import recorder_child_entry
+from tts_backends import TTSBackend, CartesiaTTS, ElevenLabsTTS, DeepgramTTS
+from audio_shm_ring import (
     CHANNELS, SAMPLE_RATE,
     SHM_NAME, SHM_SIZE,
     RingBufferReader,

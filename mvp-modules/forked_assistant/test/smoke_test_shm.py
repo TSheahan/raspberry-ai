@@ -4,21 +4,21 @@ EU-1 + EU-2: SharedMemory and Ring Buffer Smoke Tests
 EU-1 — Proves SharedMemory works across a fork on ARM64 Linux with this
         Python build, and that aligned uint64 reads are coherent without locks.
 
-EU-2 — Proves ring_buffer.RingBufferWriter / RingBufferReader work correctly:
+EU-2 — Proves audio_shm_ring.RingBufferWriter / RingBufferReader work correctly:
         IPC test (fork): child writes audio-sized frames, master reads span.
         Wrap test (in-process): write past ring boundary, verify wrap-around
         and stale detection.
 """
 
 import os, sys
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'src'))
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..', '..', 'assistant'))
 
 import struct
 import time
 from multiprocessing import Process
 from multiprocessing.shared_memory import SharedMemory
 
-from ring_buffer import (
+from audio_shm_ring import (
     FRAME_BYTES, RING_SIZE, SHM_SIZE, SAMPLE_RATE, SAMPLE_WIDTH,
     RingBufferWriter, RingBufferReader, read_header,
 )

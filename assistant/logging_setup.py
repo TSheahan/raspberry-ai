@@ -1,5 +1,5 @@
 """
-log_config.py — Shared logging configuration for forked_assistant.
+logging_setup.py — Shared logging configuration for the voice assistant runtime.
 
 Routes stdlib logging through loguru so our output matches Pipecat's
 format and coloring exactly. Both processes call configure_logging()
@@ -7,7 +7,7 @@ independently after fork — logging state is not inherited usefully
 across the process boundary.
 
 Usage:
-    from log_config import configure_logging, TRACE, PERF
+    from logging_setup import configure_logging, TRACE, PERF
     from loguru import logger
     configure_logging()          # call once at process entry
     logger.log(TRACE, "per-frame detail: %s", value)
@@ -77,7 +77,7 @@ class _InterceptHandler(logging.Handler):
 def _format(record: dict) -> str:
     """Format callable for the loguru sink.
 
-    Uses extra["name"] when present (set by master.py's logger.bind call)
+    Uses extra["name"] when present (set by voice_assistant.py's logger.bind call)
     so that process shows as "master" rather than "__main__". Falls back to
     the loguru module name for all other callers. Matches loguru's default
     format with {function}:{line} for call-site context.

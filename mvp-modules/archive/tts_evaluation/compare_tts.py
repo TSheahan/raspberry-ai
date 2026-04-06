@@ -70,8 +70,8 @@ from loguru import logger
 load_dotenv(override=True)   # searches upward from cwd; override=True matches project convention
 
 _REPO_ROOT = Path(__file__).resolve().parents[3]   # raspberry-ai/
-sys.path.insert(0, str(_REPO_ROOT / "mvp-modules" / "forked_assistant" / "src"))
-from tts import _strip_markdown  # noqa: E402  (side-effect-free helper from tts.py)
+sys.path.insert(0, str(_REPO_ROOT / "assistant"))
+from tts_backends import _strip_markdown  # noqa: E402  (side-effect-free helper from tts_backends.py)
 
 # ---------------------------------------------------------------------------
 # Defaults

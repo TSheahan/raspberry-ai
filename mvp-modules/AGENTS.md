@@ -13,20 +13,21 @@ This repo lives on Windows for Cursor IDE availability and is checked out on the
 ## Directory Structure
 
 ```
-mvp-modules/
-├── AGENTS.md              ← you are here
-├── INDEX.md               ← living map of all content
-├── starting_brief.md      ← project definition (steps 1–9)
-├── memory/                ← structured knowledge for purpose-specific recall
-├── deliverables/          ← concluded step outputs (steps 4–6)
-├── archive/               ← concluded development efforts
-│   ├── step6/             ← wake+capture+STT pipeline (concluded 2026-03-31)
-│   └── step7/             ← agentic layer attempt (concluded 2026-04-01)
-└── forked_assistant/      ← ACTIVE: two-process recorder architecture
-    ├── spec/              ← design specifications
-    ├── src/               ← library code (ring_buffer, recorder_state)
-    ├── test/              ← harnesses and smoke tests
-    └── archive/           ← superseded snapshots
+raspberry-ai/               ← repo root (sibling context)
+├── assistant/             ← ACTIVE: voice assistant runtime Python (see assistant/AGENTS.md)
+└── mvp-modules/
+    ├── AGENTS.md          ← you are here
+    ├── INDEX.md           ← living map of all content
+    ├── starting_brief.md  ← project definition (steps 1–9)
+    ├── memory/            ← structured knowledge for purpose-specific recall
+    ├── deliverables/      ← concluded step outputs (steps 4–6)
+    ├── archive/           ← concluded development efforts
+    │   ├── step6/         ← wake+capture+STT pipeline (concluded 2026-03-31)
+    │   └── step7/         ← agentic layer attempt (concluded 2026-04-01)
+    └── forked_assistant/  ← ACTIVE: specs, harnesses, archive for two-process architecture
+        ├── spec/          ← design specifications
+        ├── test/          ← harnesses and smoke tests (sys.path → ../../assistant)
+        └── archive/       ← superseded snapshots
 ```
 
 ## Naming Convention: Time-bound vs Durable
@@ -48,7 +49,7 @@ mvp-modules/
 
 ## What's Active
 
-`forked_assistant/` is the active development frontier. It implements a two-process architecture (recorder child on core 0, master on cores 1–3) to solve the shutdown crash that blocked step 7. See `forked_assistant/AGENTS.md` for detailed context.
+**`assistant/`** (repo root) holds the runtime Python: master process, recorder child, TTS, agent session, and shared-memory ring. **`forked_assistant/`** holds specs, harnesses under `test/`, and `archive/` for the same two-process architecture (recorder on core 0, master on cores 1–3). See `assistant/AGENTS.md` and `forked_assistant/AGENTS.md` for context.
 
 ## Memory Files
 

@@ -1,7 +1,7 @@
 """
 test_harness.py — EU-3d master-side harness.
 
-Spawns the real recorder child (src/recorder_child.py), runs 3
+Spawns the real recorder child (assistant/recorder_process.py), runs 3
 wake->capture->VAD cycles reading ring buffer spans, then shuts down.
 
 Usage (on Pi with ReSpeaker):
@@ -12,13 +12,13 @@ Usage (on Pi with ReSpeaker):
 
 import os
 import sys
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'src'))
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..', '..', 'assistant'))
 
 from multiprocessing import Pipe, Process
 from multiprocessing.shared_memory import SharedMemory
 
-from recorder_child import recorder_child_entry
-from ring_buffer import (
+from recorder_process import recorder_child_entry
+from audio_shm_ring import (
     SAMPLE_RATE, SAMPLE_WIDTH,
     SHM_NAME, SHM_SIZE,
     RingBufferReader,
