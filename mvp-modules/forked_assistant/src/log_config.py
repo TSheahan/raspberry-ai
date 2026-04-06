@@ -22,11 +22,12 @@ INFO, WARNING, ERROR. Default: INFO.
 
 Third-party stdlib loggers (after ``configure_logging()``):
 
-  ``cartesia`` and ``websockets`` default to **INFO**, so with ``LOG_LEVEL=DEBUG``
-  you still get forked_assistant DEBUG lines without every WebSocket frame
-  (Cartesia logs raw JSON including base64 ``data`` audio). Override with
-  ``CARTESIA_LOG_LEVEL`` / ``WEBSOCKETS_LOG_LEVEL`` (same names as ``logging``
-  levels: ``DEBUG``, ``INFO``, …) to troubleshoot the SDK or protocol.
+  Both ``cartesia`` and ``websockets`` default to **DEBUG** with filters that
+  truncate audio payloads: websockets BINARY frames are reduced to opcode +
+  byte count; Cartesia JSON ``"data"`` blobs are replaced with a decoded-size
+  placeholder via byte-offset splicing (no ``json.loads`` overhead).
+  Override with ``CARTESIA_LOG_LEVEL`` / ``WEBSOCKETS_LOG_LEVEL`` (same names as
+  ``logging`` levels: ``DEBUG``, ``INFO``, …).
 """
 
 import logging
@@ -117,21 +118,117 @@ def configure_logging(default_level: str = "INFO") -> None:
     _apply_third_party_log_levels()
 
 
-def _apply_third_party_log_levels() -> None:
-    """Cap noisy stdlib loggers so LOG_LEVEL=DEBUG stays usable.
+class _WebsocketsBinaryFrameFilter(logging.Filter):
+    """Truncate websockets debug logs for BINARY frames (audio media chunks).
 
-    Libraries (Cartesia, websockets) log at DEBUG with huge payloads; we cannot
-    control their emit sites from forked_assistant. Per-logger levels apply
-    before records reach the intercept handler.
+    The log call is ``logger.debug("> %s", frame)`` where ``frame`` is a
+    ``websockets.frames.Frame``.  For BINARY frames, we replace the arg with
+    a short summary (opcode + byte count) *before* ``Frame.__str__`` is called,
+    avoiding the expensive hex-encoding of the full payload.
     """
 
-    def _set(name: str, env_key: str, default: int) -> None:
-        raw = os.environ.get(env_key, "").strip().upper()
-        if raw:
-            level = getattr(logging, raw, default)
-        else:
-            level = default
-        logging.getLogger(name).setLevel(level)
+    def filter(self, record: logging.LogRecord) -> bool:
+        if record.levelno != logging.DEBUG or not record.args:
+            return True
+        from websockets.frames import Frame, Opcode
 
-    _set("cartesia", "CARTESIA_LOG_LEVEL", logging.INFO)
-    _set("websockets", "WEBSOCKETS_LOG_LEVEL", logging.INFO)
+        args = record.args if isinstance(record.args, tuple) else (record.args,)
+        for i, a in enumerate(args):
+            if isinstance(a, Frame) and a.opcode is Opcode.BINARY:
+                record.args = tuple(
+                    f"BINARY [{len(a.data)} bytes]" if j == i else v
+                    for j, v in enumerate(args)
+                )
+                break
+        return True
+
+
+# Byte needles for locating the base64 audio blob in Cartesia JSON.
+# The server may or may not include a space after the colon.
+_DATA_NEEDLE = b'"data":"'
+_DATA_NEEDLE_SP = b'"data": "'
+
+def _truncate_cartesia_data(raw: bytes | str) -> bytes | str:
+    """Replace the base64 ``"data"`` value in a Cartesia JSON message with a
+    byte-length placeholder.  Pure byte-offset slicing — no JSON decode.
+
+    Returns the original object unchanged if there is no ``"data"`` key.
+    """
+    b = raw if isinstance(raw, bytes) else raw.encode()
+
+    start = b.find(_DATA_NEEDLE)
+    if start != -1:
+        val_start = start + len(_DATA_NEEDLE)
+    else:
+        start = b.find(_DATA_NEEDLE_SP)
+        if start == -1:
+            return raw
+        val_start = start + len(_DATA_NEEDLE_SP)
+
+    val_end = b.find(b'"', val_start)
+    if val_end == -1:
+        return raw
+
+    b64_len = val_end - val_start
+    audio_bytes = b64_len * 3 // 4  # base64 → decoded size (approx)
+    placeholder = f"<{audio_bytes} bytes audio>".encode()
+    truncated = b[:val_start] + placeholder + b[val_end:]
+
+    return truncated if isinstance(raw, bytes) else truncated.decode()
+
+
+class _CartesiaAudioDataFilter(logging.Filter):
+    """Truncate the base64 ``"data"`` blob in Cartesia TTS websocket debug logs.
+
+    The emit site is ``log.debug("Received websocket message: %s", message)``
+    where ``message`` is raw JSON bytes from the wire.  We locate the
+    ``"data":"<base64>"`` span with byte offsets and splice in a size
+    placeholder — no ``json.loads``, so there is zero decode overhead on top
+    of what ``parse_event`` already does.
+    """
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        if record.levelno != logging.DEBUG or not record.args:
+            return True
+        args = record.args if isinstance(record.args, tuple) else (record.args,)
+        replaced = False
+        new_args: list = []
+        for a in args:
+            if isinstance(a, (bytes, str)) and not replaced:
+                t = _truncate_cartesia_data(a)
+                if t is not a:
+                    replaced = True
+                new_args.append(t)
+            else:
+                new_args.append(a)
+        if replaced:
+            record.args = tuple(new_args)
+        return True
+
+
+def _apply_third_party_log_levels() -> None:
+    """Set per-library log levels and install payload filters.
+
+    Both ``websockets`` and ``cartesia`` default to **DEBUG** with filters that
+    truncate binary/audio payloads, keeping connection lifecycle and protocol
+    debug output visible without hex or base64 spam.
+    """
+
+    # tracking this as a possible re-introduction
+    # - first try relying on the filters and setting debug when wanted.
+    # def _set(name: str, env_key: str, default: int) -> None:
+    #     raw = os.environ.get(env_key, "").strip().upper()
+    #     if raw:
+    #         level = getattr(logging, raw, default)
+    #     else:
+    #         level = default
+    #     logging.getLogger(name).setLevel(level)
+    #_set("cartesia", "CARTESIA_LOG_LEVEL", logging.DEBUG)
+    #_set("websockets", "WEBSOCKETS_LOG_LEVEL", logging.DEBUG)
+
+    ws_filter = _WebsocketsBinaryFrameFilter()
+    for name in ("websockets", "websockets.client", "websockets.server"):
+        logging.getLogger(name).addFilter(ws_filter)
+
+    cartesia_filter = _CartesiaAudioDataFilter()
+    logging.getLogger("cartesia.resources.tts").addFilter(cartesia_filter)
