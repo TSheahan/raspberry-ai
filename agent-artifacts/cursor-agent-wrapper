@@ -7,7 +7,7 @@ readonly LOG_FILE=/var/log/agent-wrapper.log
 readonly DEFAULT_REAL=/home/agent/.local/bin/agent
 REAL_BIN="${CURSOR_AGENT_REAL_BIN:-${AGENT_REAL_BIN:-$DEFAULT_REAL}}"
 
-ts() { date -u +"%Y-%m-%dT%H:%M:%SZ"; }
+ts() { date +"%Y-%m-%dT%H:%M:%S%z"; }
 
 log_line() {
   local line="$1"

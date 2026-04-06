@@ -48,6 +48,7 @@
   - `cp` wrapper from checkout → `/home/agent/artifacts/cursor-agent-wrapper`
   - `chown agent:agent` on file and directory (directory `0755`, file `0755`)
   - reference **fixed paths only**; no user-supplied arguments
+- `agent-artifacts/scripts/post-merge-hook.sh` — dual-use: tracked git hook **and** manual deploy command. Calls the installer via `sudo -n`.
 
 ### 2. Install git hooks (as `voice`, once per clone)
 
@@ -56,18 +57,18 @@ From the repo root:
 ```bash
 cd /home/voice/raspberry-ai
 chmod +x agent-artifacts/scripts/install-cursor-agent-wrapper.sh
+chmod +x agent-artifacts/scripts/post-merge-hook.sh
+ln -sf ../../agent-artifacts/scripts/post-merge-hook.sh .git/hooks/post-merge
+ln -sf ../../agent-artifacts/scripts/post-merge-hook.sh .git/hooks/post-checkout
 ```
 
-Create `.git/hooks/post-merge` and `.git/hooks/post-checkout` (executable) that run:
+The hook is a tracked script — symlinked, not copied — so it stays in sync with the repo.
+
+If `sudo -n` fails, operator runs the same script manually after pull or local edit:
 
 ```bash
-#!/bin/bash
-set -e
-REPO_ROOT="$(git rev-parse --show-toplevel)"
-sudo -n "$REPO_ROOT/agent-artifacts/scripts/install-cursor-agent-wrapper.sh"
+agent-artifacts/scripts/post-merge-hook.sh
 ```
-
-If `sudo -n` fails, operator runs the installer manually after pull (see Verify).
 
 ### 3. Sudoers (as privileged user)
 
