@@ -54,6 +54,8 @@ main() {
   # re-attach it to the setsid child.
   exec 3<&0
 
+  # No separate `command -v setsid` probe: Pi profile assumes util-linux;
+  # absence surfaces as a shell start failure instead of log_event fatal.
   setsid -- "$REAL_BIN" "$@" <&3 &
   local child=$!
   exec 3<&-
@@ -63,9 +65,12 @@ main() {
   forward_signal() {
     local name="$1"
     log_event signal_forward "sig=${name} kill_target=-${child}"
+    # INT and TERM both send TERM to the group so the CLI can exit cleanly
+    # (same signal as a typical service stop).
     kill -TERM -- -"${child}" 2>/dev/null || true
   }
 
+  # child is assigned before traps are installed; no empty-PGID forward in normal runs.
   trap 'forward_signal TERM' TERM
   trap 'forward_signal INT'  INT
 
