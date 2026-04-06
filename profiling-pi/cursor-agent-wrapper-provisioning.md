@@ -42,6 +42,7 @@
 ### 1. Add repo files (developer / in git)
 
 - `agent-artifacts/cursor-agent-wrapper` — supervising launcher (§5b); bash, `setsid` + `kill` to child process group, logging per spec §6.
+- `agent-artifacts/scripts/smoke-wrapped-agent.py` — optional stdlib-only one-shot run: same subprocess shape as `master.py` / `CursorAgentSession`, without the voice stack.
 - `agent-artifacts/scripts/install-cursor-agent-wrapper.sh` — must:
   - `mkdir -p /home/agent/artifacts`
   - `cp` wrapper from checkout → `/home/agent/artifacts/cursor-agent-wrapper`
@@ -155,6 +156,18 @@ sudo -u agent bash -c 'echo verify >> /var/log/agent-wrapper.log'
 stat -c '%a %U %G' /var/log/agent-wrapper.log
 # Expected: 640 agent agent
 ```
+
+### Smoke test (wrapped agent, no `master.py`)
+
+From the repo root as `voice`, with `.env` loaded (same `AGENT_*` as production):
+
+```bash
+cd /home/voice/raspberry-ai
+set -a && . /home/voice/.env && set +a
+python3 agent-artifacts/scripts/smoke-wrapped-agent.py "Say hello in five words."
+```
+
+This mirrors `CursorAgentSession` spawn (`sudo -u agent` when `AGENT_USER` is set, `start_new_session=True`, transcript on stdin only). **Stdout** is raw stream-json lines; **stderr** is the CLI (and optional wrapper log fallback). Use `--env-file /home/voice/.env` instead of `set -a` if you prefer.
 
 ---
 
