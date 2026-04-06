@@ -148,11 +148,21 @@ Supervise mode improves group signal delivery, but **`CursorAgentSession.run()`*
 
 ---
 
-## Appendix A — Termination handler / sudo “escape hatch” (fallback only)
+## Appendix A — Orphan reaping (implemented 2026-04-06)
 
-**Scope (future):** A **second** sudoers entry for a **very narrow** helper (e.g. fixed script + PID file from wrapper) — **not** general `pkill`.
+**Supersedes:** Previous “escape hatch” stub. Orphan `worker-server` processes were confirmed in production — the Cursor CLI spawns a `worker-server` child ~15s in, then the leader exits cleanly at ~20s, leaving the worker reparented to init at ~140MB RSS each. Four agent turns would OOM a 1GB Pi.
 
-**When to implement:** Only if orphans persist after §5b + `finally` + optional Python `killpg`.
+**Implementation (in wrapper):**
+
+1. **`pgid_snapshot` fix:** `ps -g` selects by *session*, not process group; replaced with `pgrep --pgroup` → `ps -p` so orphans are visible after the session leader exits.
+2. **`reap_orphans` function** runs after the leader exits and the exit event is logged:
+   - **Settle** (`WRAPPER_ORPHAN_SETTLE`, default 3s) — lets worker-servers finish in-flight I/O.
+   - **Snapshot** — if PGID is clean, log `status=clean` and return.
+   - **SIGTERM** the whole PGID (`kill -TERM -- -$pgid`).
+   - **Poll** up to `WRAPPER_ORPHAN_KILL_GRACE` (default 4s), checking each second.
+   - **SIGKILL** any survivors; log final status.
+
+**No extra sudo needed** — the wrapper runs as `agent` (same user as the orphans).
 
 ---
 
@@ -179,6 +189,6 @@ Canonical design: **this file** (`mvp-modules/forked_assistant/spec/cursor_agent
 | D5 | Log rotation | **Wanted**; profiling documents **gap** until logrotate drop-in added | Provisioning § “Logging” |
 | D6 | `voice` → `agent` file sync | **Fixed installer** + sudoers; no broad write to `/home/agent` | §7, §8 |
 | D7 | Sudo to run agent | **Wrapper path only** (wrapper-only policy) | §7, `agent-user-setup` migration note |
-| D8 | Escape hatch | **Deferred** | Appendix A |
+| D8 | Orphan reaping | **Closed** (2026-04-06) | Appendix A, wrapper `reap_orphans` |
 
 **Coverage note:** Open items are **explicitly listed** (D5 rotation template). PGID validation under `sudo` is **closed** (2026-04-06 smoke test confirmed child PGID isolation). Everything else in this spec is **closed** for the first implementation pass.

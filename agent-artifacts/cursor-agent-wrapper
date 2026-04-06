@@ -31,15 +31,95 @@ log_event() {
 # Snapshot surviving processes in PGID $1. Output is a compact one-liner
 # suitable for a log field: "pid:state:etime:comm pid:state:etime:comm …"
 # Returns 1 (empty string) when the group has no living processes.
+#
+# Note: `ps -g` selects by *session*, not process group, so it loses track
+# of orphans once the session leader exits. We use pgrep --pgroup to get
+# the PIDs, then ps -p to format them.
 pgid_snapshot() {
   local pgid="$1"
+  local pids
+  pids="$(pgrep --pgroup "$pgid" 2>/dev/null | paste -sd, -)"
+  if [[ -z "$pids" ]]; then
+    return 1
+  fi
   local snap
-  snap="$(ps -o pid=,stat=,etime=,comm= --no-headers -g "$pgid" 2>/dev/null | awk '{printf "%s:%s:%s:%s ", $1,$2,$3,$4}')"
+  snap="$(ps -o pid=,stat=,etime=,comm= --no-headers -p "$pids" 2>/dev/null | awk '{printf "%s:%s:%s:%s ", $1,$2,$3,$4}')"
   snap="${snap% }"
   if [[ -z "$snap" ]]; then
     return 1
   fi
   printf '%s' "$snap"
+}
+
+# Maximum settle window (seconds) before sending TERM to orphan process group.
+# We poll at short intervals and exit early if the PGID is already clean,
+# so this is a ceiling, not a fixed sleep.
+readonly ORPHAN_SETTLE="${WRAPPER_ORPHAN_SETTLE:-2}"
+
+# Deadline (seconds) between SIGTERM and SIGKILL for orphan stragglers.
+readonly ORPHAN_KILL_GRACE="${WRAPPER_ORPHAN_KILL_GRACE:-3}"
+
+# Poll-wait: sleep 0.25s then check PGID, up to $1 iterations.
+# Returns 0 (success) if PGID goes clean, 1 if still alive at ceiling.
+# Sets $_poll_iters to the number of iterations actually waited.
+_poll_until_clean() {
+  local pgid="$1" max_iters="$2"
+  _poll_iters=0
+  while (( _poll_iters < max_iters )); do
+    sleep 0.25
+    _poll_iters=$((_poll_iters + 1))
+    if ! pgid_snapshot "$pgid" >/dev/null 2>&1; then
+      return 0
+    fi
+  done
+  return 1
+}
+
+# Reap any processes still alive in PGID $1 after the leader exits.
+# Sequence: settle (poll) → SIGTERM → grace (poll) → SIGKILL survivors.
+reap_orphans() {
+  local pgid="$1"
+
+  # settle_iters = ORPHAN_SETTLE / 0.25  (e.g. 2s → 8 iterations)
+  local settle_iters=$(( ORPHAN_SETTLE * 4 ))
+
+  if _poll_until_clean "$pgid" "$settle_iters"; then
+    local ms=$(( _poll_iters * 250 ))
+    log_event reap_orphans "pgid=${pgid} status=clean settle_ms=${ms}"
+    return 0
+  fi
+
+  local snap
+  if ! snap="$(pgid_snapshot "$pgid")"; then
+    log_event reap_orphans "pgid=${pgid} status=clean settle_ms=$(( _poll_iters * 250 ))"
+    return 0
+  fi
+
+  log_event reap_orphans "pgid=${pgid} status=found settle_ms=$(( _poll_iters * 250 )) procs=${snap}"
+
+  kill -TERM -- -"${pgid}" 2>/dev/null || true
+
+  # grace_iters = ORPHAN_KILL_GRACE / 0.25
+  local grace_iters=$(( ORPHAN_KILL_GRACE * 4 ))
+
+  if _poll_until_clean "$pgid" "$grace_iters"; then
+    local ms=$(( _poll_iters * 250 ))
+    log_event reap_orphans "pgid=${pgid} status=term_ok elapsed_ms=${ms}"
+    return 0
+  fi
+
+  if snap="$(pgid_snapshot "$pgid")"; then
+    log_event reap_orphans "pgid=${pgid} status=escalate_kill procs=${snap}"
+    kill -KILL -- -"${pgid}" 2>/dev/null || true
+    sleep 0.25
+    if snap="$(pgid_snapshot "$pgid")"; then
+      log_event reap_orphans "pgid=${pgid} status=kill_failed procs=${snap}"
+    else
+      log_event reap_orphans "pgid=${pgid} status=kill_ok"
+    fi
+  else
+    log_event reap_orphans "pgid=${pgid} status=term_ok elapsed_ms=$(( ORPHAN_KILL_GRACE * 1000 ))"
+  fi
 }
 
 # Argv is flags/paths only; transcript is on stdin (CursorAgentSession). Cap length for logs.
@@ -148,6 +228,7 @@ main() {
   local snap
   if snap="$(pgid_snapshot "$child")"; then
     log_event exit "child_exit=${wait_status} duration_ms=${duration_ms} signal_sent=${signal_sent} orphan_procs=${snap}"
+    reap_orphans "$child"
   else
     log_event exit "child_exit=${wait_status} duration_ms=${duration_ms} signal_sent=${signal_sent} orphan_procs=none"
   fi
