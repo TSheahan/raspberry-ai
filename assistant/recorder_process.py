@@ -678,7 +678,10 @@ async def recorder_child_main(pipe, shm_name: str) -> None:
 
         pipeline = Pipeline(processors)
         runner = PipelineRunner()
-        task = PipelineTask(pipeline)
+        # idle_timeout_secs=None: this pipeline produces only audio frames, never
+        # BotSpeakingFrame/LLMFullResponseEndFrame, so pipecat's idle detector
+        # would cancel it after the default 300 s even during normal wake_listen.
+        task = PipelineTask(pipeline, idle_timeout_secs=None)
 
         pipe.send({"cmd": "READY"})
         logger.info("[child] queue depth monitor ENABLED (alarm threshold={})",
@@ -728,6 +731,20 @@ async def recorder_child_main(pipe, shm_name: str) -> None:
         except asyncio.CancelledError:
             pass
         finally:
+            # If the pipeline exited without going through _initiate_shutdown()
+            # (e.g. a future pipecat idle-timeout or internal cancel), send
+            # SHUTDOWN_COMMENCED so the master can exit master_loop cleanly
+            # instead of blocking on pipe.recv() until EOFError.
+            if not shutdown_initiated:
+                shutdown_initiated = True
+                try:
+                    pipe.send({"cmd": "SHUTDOWN_COMMENCED"})
+                    logger.warning(
+                        "[child] pipeline exited without explicit shutdown — "
+                        "SHUTDOWN_COMMENCED sent retroactively"
+                    )
+                except Exception:
+                    pass
             listener.cancel()
             try:
                 await listener

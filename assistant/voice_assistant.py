@@ -391,6 +391,13 @@ def master_loop(pipe, shm: SharedMemory, child: Process) -> None:
                 logger.info("[master] child initiated shutdown")
                 return
 
+            elif cmd == "SHUTDOWN_FINISHED":
+                # Child exited cleanly without a prior SHUTDOWN_COMMENCED
+                # (e.g. retroactive send from unexpected pipeline exit).
+                # Treat as a clean child-initiated shutdown rather than a crash.
+                logger.info("[master] child finished without SHUTDOWN_COMMENCED — exiting cleanly")
+                return
+
             elif cmd == "ERROR":
                 logger.error("[master] ERROR from child: {}", msg.get("msg", "?"))
 
