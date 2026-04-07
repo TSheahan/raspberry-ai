@@ -310,20 +310,10 @@ def master_loop(pipe, shm: SharedMemory, child: Process) -> None:
 
             if cmd == "STATE_CHANGED":
                 res = state.on_state_changed(msg["state"])
-                if (
-                    res.accepted
-                    and state.phase == "capture"
-                    and state.capture is None
-                    and state.stt_start_pending
-                ):
+                if res.accepted and state.stt_arm_ready:
                     _arm_stt_session(state, ring_reader, dg_client)
                     print("!! SPEAK !!", flush=True)
-                elif (
-                    res.accepted
-                    and state.phase == "capture"
-                    and state.capture is None
-                    and not state.stt_start_pending
-                ):
+                elif res.accepted and state.capture_phase_without_pending_stt:
                     logger.warning(
                         "[master] STATE_CHANGED(capture) but STT not pending — "
                         "possible protocol skew",
@@ -363,15 +353,7 @@ def master_loop(pipe, shm: SharedMemory, child: Process) -> None:
                     continue
                 logger.info("[master] VAD_STOPPED    write_pos={}", msg["write_pos"])
 
-                # Stop the ring tail and wait for Deepgram to finalize.
-                cap = state.capture
-                if cap is not None:
-                    cap.stop_event.set()
-                    if cap.thread is not None:
-                        cap.thread.join(timeout=5)
-
-                transcript = cap.get_transcript() if cap else ""
-                state.capture = None
+                transcript = state.finalize_capture()
 
                 pipe.send({"cmd": "SET_IDLE"})
                 state.processing = True
@@ -404,10 +386,7 @@ def master_loop(pipe, shm: SharedMemory, child: Process) -> None:
     finally:
         agent.close()
         tts.close()
-        if state.capture is not None:
-            state.capture.stop_event.set()
-            if state.capture.thread is not None:
-                state.capture.thread.join(timeout=3)
+        state.teardown_capture()
 
 
 # ---------------------------------------------------------------------------

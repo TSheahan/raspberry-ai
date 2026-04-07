@@ -48,6 +48,16 @@ class MasterState:
     def phase(self) -> str:
         return self._phase
 
+    @property
+    def stt_arm_ready(self) -> bool:
+        """True when STT thread should be started: capture believed, no session yet, pending flag set."""
+        return self._phase == "capture" and self.capture is None and self.stt_start_pending
+
+    @property
+    def capture_phase_without_pending_stt(self) -> bool:
+        """Capture believed with no session and no pending flag — indicates protocol skew."""
+        return self._phase == "capture" and self.capture is None and not self.stt_start_pending
+
     def _vad_context_ok(self) -> bool:
         """Silero events apply only once we believe capture *and* STT session exists (§2d)."""
         return self._phase == "capture" and self.capture is not None
@@ -103,14 +113,14 @@ class MasterState:
 
     def _run_exit_hook(self, ph: str) -> None:
         if ph == "capture":
-            self._teardown_capture_if_live()
+            self.teardown_capture()
 
     def _run_entry_hook(self, ph: str) -> None:
         if ph == "wake_listen":
             self.vad_speaking = False
             self.stt_start_pending = False
             self.agent_prepare_done = False
-            self._teardown_capture_if_live()
+            self.teardown_capture()
             self.processing = False
         elif ph == "capture":
             self.vad_speaking = False
@@ -121,7 +131,8 @@ class MasterState:
             self.stt_start_pending = False
             self.agent_prepare_done = False
 
-    def _teardown_capture_if_live(self) -> None:
+    def teardown_capture(self) -> None:
+        """Stop and discard any live capture session."""
         cap = self.capture
         if cap is None:
             return
@@ -129,6 +140,21 @@ class MasterState:
         if cap.thread is not None:
             cap.thread.join(timeout=5)
         self.capture = None
+
+    def finalize_capture(self) -> str:
+        """Stop the live capture session and return its transcript.
+
+        Returns the empty string if no capture was active.
+        """
+        cap = self.capture
+        if cap is None:
+            return ""
+        cap.stop_event.set()
+        if cap.thread is not None:
+            cap.thread.join(timeout=5)
+        transcript = cap.get_transcript()
+        self.capture = None
+        return transcript
 
     def on_wake_detected(self, write_pos: int, score: float, keyword: str) -> bool:
         if self.processing:
