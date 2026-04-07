@@ -202,14 +202,13 @@ def _arm_stt_session(
     dg_client: DeepgramClient,
 ) -> None:
     """Start Deepgram + ring tail once belief is capture (STATE_CHANGED) and SET_CAPTURE was sent."""
-    if not state.stt_start_pending or state.capture is not None:
-        return
     cap = _SttCaptureSession()
-    state.capture = cap
-    state.stt_start_pending = False
+    wake_pos = state.arm_stt(cap)
+    if wake_pos < 0:
+        return
     cap.thread = threading.Thread(
         target=_run_capture,
-        args=(cap, ring_reader, state.wake_pos, dg_client),
+        args=(cap, ring_reader, wake_pos, dg_client),
         daemon=True,
     )
     cap.thread.start()
@@ -356,13 +355,13 @@ def master_loop(pipe, shm: SharedMemory, child: Process) -> None:
                 transcript = state.finalize_capture()
 
                 pipe.send({"cmd": "SET_IDLE"})
-                state.processing = True
+                state.begin_processing()
                 try:
                     cognitive_loop(transcript, agent, tts)
                 except Exception as exc:
                     logger.error("cognitive loop error: {}", exc)
                 finally:
-                    state.processing = False
+                    state.end_processing()
                     try:
                         pipe.send({"cmd": "SET_WAKE_LISTEN"})
                     except (BrokenPipeError, OSError):

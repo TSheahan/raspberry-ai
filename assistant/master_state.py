@@ -35,7 +35,7 @@ class MasterState:
 
     def __init__(self) -> None:
         self._phase = "dormant"
-        self.processing = False
+        self._processing = False
         self.wake_pos = 0
         self.capture: Any = None
         self.vad_speaking = False
@@ -47,6 +47,20 @@ class MasterState:
     @property
     def phase(self) -> str:
         return self._phase
+
+    @property
+    def processing(self) -> bool:
+        return self._processing
+
+    def begin_processing(self) -> None:
+        """Mark the start of a cognitive-loop cycle."""
+        if self._processing:
+            _log.warning("[master_state] begin_processing while already processing")
+        self._processing = True
+
+    def end_processing(self) -> None:
+        """Mark the end of a cognitive-loop cycle."""
+        self._processing = False
 
     @property
     def stt_arm_ready(self) -> bool:
@@ -121,7 +135,7 @@ class MasterState:
             self.stt_start_pending = False
             self.agent_prepare_done = False
             self.teardown_capture()
-            self.processing = False
+            self._processing = False
         elif ph == "capture":
             self.vad_speaking = False
         elif ph == "idle":
@@ -156,8 +170,21 @@ class MasterState:
         self.capture = None
         return transcript
 
+    def arm_stt(self, capture_session: Any) -> int:
+        """Arm the STT session: store capture ref, clear pending flag, return wake_pos.
+
+        Caller is responsible for creating capture_session and starting the
+        Deepgram thread at the returned write position.  Returns -1 if not ready.
+        """
+        if not self.stt_arm_ready:
+            _log.warning("[master_state] arm_stt called when not ready")
+            return -1
+        self.capture = capture_session
+        self.stt_start_pending = False
+        return self.wake_pos
+
     def on_wake_detected(self, write_pos: int, score: float, keyword: str) -> bool:
-        if self.processing:
+        if self._processing:
             return False
         if self._phase != "wake_listen":
             _log.debug(

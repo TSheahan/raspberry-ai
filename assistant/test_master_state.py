@@ -24,7 +24,7 @@ def test_wake_gated() -> None:
     s.on_state_changed("wake_listen")
     assert s.on_wake_detected(1, 0.9, "ok")
     assert s.wake_pos == 1
-    s.processing = True
+    s.begin_processing()
     assert not s.on_wake_detected(2, 0.9, "ok")
 
 
@@ -94,6 +94,23 @@ def test_note_agent_prepare_idempotent_after_double_call() -> None:
     assert s.agent_prepare_done
 
 
+def test_arm_stt() -> None:
+    s = MasterState()
+    s.on_state_changed("wake_listen")
+    s.on_wake_detected(42, 0.9, "ok")
+    s.mark_stt_pending_after_set_capture()
+    s.on_state_changed("capture")
+    assert s.stt_arm_ready
+    mock_cap = object()
+    pos = s.arm_stt(mock_cap)
+    assert pos == 42
+    assert s.capture is mock_cap
+    assert not s.stt_start_pending
+    assert not s.stt_arm_ready
+    # Second call rejected — already armed.
+    assert s.arm_stt(object()) == -1
+
+
 def main() -> None:
     test_stale_state_changed()
     test_wake_gated()
@@ -103,6 +120,7 @@ def main() -> None:
     test_stt_pending_cleared_on_idle_entry()
     test_agent_prepare_tracking()
     test_note_agent_prepare_idempotent_after_double_call()
+    test_arm_stt()
     print("test_master_state OK")
 
 
