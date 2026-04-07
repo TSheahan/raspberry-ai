@@ -33,7 +33,12 @@ from multiprocessing.shared_memory import SharedMemory
 from logging_setup import active_level_no, configure_logging, PERF, TRACE
 from loguru import logger
 
+import openwakeword as _oww
 from openwakeword.model import Model as OWWModel
+
+_OWW_MODELS_DIR = os.path.join(os.path.dirname(os.path.abspath(_oww.__file__)), "resources", "models")
+_WAKE_MODEL = os.environ.get("WAKE_MODEL", "hey_sara")
+_WAKE_MODEL_PATH = os.path.join(_OWW_MODELS_DIR, f"{_WAKE_MODEL}.onnx")
 
 from pipecat.pipeline.pipeline import Pipeline
 from pipecat.pipeline.runner import PipelineRunner
@@ -404,8 +409,11 @@ class OpenWakeWordProcessor(FrameProcessor):
     def __init__(self, state: WiredRecorderState):
         super().__init__()
         self.state = state
-        logger.info("loading openwakeword models...")
-        self.model = OWWModel()
+        logger.info("loading openwakeword model: {}", _WAKE_MODEL)
+        self.model = OWWModel(
+            wakeword_models=[_WAKE_MODEL_PATH],
+            inference_framework="onnx",
+        )
         self._chunks = []
         self.last_detection_time = 0.0
         self.DEBOUNCE_SECONDS = 1.8
@@ -465,7 +473,7 @@ class OpenWakeWordProcessor(FrameProcessor):
                 return
             current_time = time.time()
             for wakeword, score in predictions.items():
-                if (wakeword == "hey_jarvis"
+                if (wakeword == _WAKE_MODEL
                         and score > 0.5
                         and (current_time - self.last_detection_time)
                             > self.DEBOUNCE_SECONDS):
