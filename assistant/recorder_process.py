@@ -50,6 +50,7 @@ from pipecat.audio.vad.vad_analyzer import VADParams
 from pipecat.audio.vad.vad_controller import VADController
 
 from recorder_state import RecorderState
+from recorder_state_wired import WiredRecorderState
 from audio_shm_ring import AudioShmRingWriter
 
 def _duty_cycle_enabled() -> bool:
@@ -335,48 +336,6 @@ class DutyCycleExit(FrameProcessor):
 
 
 # ---------------------------------------------------------------------------
-# RingBackedRecorderState — real downstream port (SHM ring + pipe), real upstream port
-# ---------------------------------------------------------------------------
-
-class RingBackedRecorderState(RecorderState):
-    """RecorderState with real shared-memory ring writes and real pipe signals.
-
-    Pipecat-coupled methods (_start_stream, _stop_stream, _reset_oww_full,
-    _clear_oww, _reset_silero, _drain_oww_predict) are inherited from the
-    base class — they use the weakref wiring set up during pipeline init.
-    """
-
-    def __init__(self, pipe, ring_writer: AudioShmRingWriter):
-        super().__init__(pipe=pipe, shm=None)
-        self._ring_writer = ring_writer
-
-    # --- Audio write (→ SharedMemory ring buffer) ---
-
-    def write_audio(self, frame_bytes: bytes) -> None:
-        self._ring_writer.write(frame_bytes)
-        self._write_pos = self._ring_writer.write_pos
-
-    # --- Signal emission (→ pipe to master) ---
-
-    def signal_wake_detected(self, score: float, keyword: str) -> None:
-        self._pipe.send({
-            "cmd": "WAKE_DETECTED",
-            "write_pos": self._write_pos,
-            "score": score,
-            "keyword": keyword,
-        })
-
-    def signal_vad_started(self) -> None:
-        self._pipe.send({"cmd": "VAD_STARTED", "write_pos": self._write_pos})
-
-    def signal_vad_stopped(self) -> None:
-        self._pipe.send({"cmd": "VAD_STOPPED", "write_pos": self._write_pos})
-
-    def signal_state_changed(self) -> None:
-        self._pipe.send({"cmd": "STATE_CHANGED", "state": self._phase})
-
-
-# ---------------------------------------------------------------------------
 # GatedVADProcessor — Silero inference gated to CAPTURE phase only
 # ---------------------------------------------------------------------------
 
@@ -387,7 +346,7 @@ class GatedVADProcessor(FrameProcessor):
     the VAD controller. CancelFrame/EndFrame never reach it (crash fix).
     """
 
-    def __init__(self, *, vad_analyzer, state: RecorderState,
+    def __init__(self, *, vad_analyzer, state: WiredRecorderState,
                  monitor: QueueDepthMonitor | None = None, **kwargs):
         super().__init__(**kwargs)
         self.state = state
@@ -438,11 +397,11 @@ class OpenWakeWordProcessor(FrameProcessor):
 
     Predict runs via asyncio.to_thread() so the event loop is never blocked
     by ONNX inference. Frames are pushed downstream before predict fires.
-    A drain guard in RecorderState.set_phase() awaits _pending_predict on
+    A drain guard in WiredRecorderState.set_phase() awaits _pending_predict on
     wake_listen->capture to prevent concurrent ONNX (OWW + Silero).
     """
 
-    def __init__(self, state: RecorderState):
+    def __init__(self, state: WiredRecorderState):
         super().__init__()
         self.state = state
         logger.info("loading openwakeword models...")
@@ -563,7 +522,7 @@ class AudioShmRingWriteProcessor(FrameProcessor):
 
     _LOG_INTERVAL = 50   # ~1 s at 20 ms/frame
 
-    def __init__(self, state: RecorderState):
+    def __init__(self, state: WiredRecorderState):
         super().__init__()
         self.state = state
         self._frames_written: int = 0   # total across all phases
@@ -599,7 +558,7 @@ class AudioShmRingWriteProcessor(FrameProcessor):
 # command_listener — routes pipe commands to state.set_phase()
 # ---------------------------------------------------------------------------
 
-async def command_listener(state: RingBackedRecorderState, pipe, initiate_shutdown) -> None:
+async def command_listener(state: WiredRecorderState, pipe, initiate_shutdown) -> None:
     """Poll pipe for master commands; call set_phase() on each.
 
     Returns on SHUTDOWN (after delegating to initiate_shutdown).
@@ -631,7 +590,9 @@ async def recorder_child_main(pipe, shm_name: str) -> None:
     shm = SharedMemory(name=shm_name, create=False)
     try:
         ring_writer = AudioShmRingWriter(shm)
-        state = RingBackedRecorderState(pipe=pipe, ring_writer=ring_writer)
+        state = WiredRecorderState()
+        state.set_pipe(pipe)
+        state.set_shm_ring_writer(ring_writer)
 
         transport = LocalAudioTransport(
             LocalAudioTransportParams(

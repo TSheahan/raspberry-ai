@@ -1,5 +1,10 @@
 """EU-3c Track 2 — Pipecat pipeline harness (single process).
 
+TODO(FUTURE): `RecorderState` is contract-only; `set_phase` / workers moved to
+`WiredRecorderState`. This harness still subclasses `RecorderState` and expects
+the old monolithic base — update stub to `WiredRecorderState` with mocked pipe
+/ transport or drop inheritance in favor of core gating tests (see user decision 1A).
+
 Proves Pipecat processor adaptations work with RecorderState interface.
 Real OWW, real Silero, real PyAudio/ReSpeaker. No fork, no SharedMemory, no Pipe.
 

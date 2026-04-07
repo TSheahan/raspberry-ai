@@ -2,7 +2,7 @@
 phase_protocol.py — Shared inter-process phase contract (master_state_spec.md §5a).
 
 Single source for legal phase names, cycle ordering, and transition classification.
-Imported by RecorderState (child) and later by MasterState (master).
+Imported by `RecorderState` (child contract core), `WiredRecorderState`, and `MasterState`.
 """
 
 from __future__ import annotations

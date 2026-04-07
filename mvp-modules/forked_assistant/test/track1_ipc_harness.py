@@ -1,6 +1,10 @@
 """
 track1_ipc_harness.py — EU-3b: IPC/Buffer harness (Track 1).
 
+TODO(FUTURE): `RecorderState` is contract-only; this file's `RecorderTrack1` still
+subclasses the old monolithic API. Port to `WiredRecorderState` with no-op worker
+methods (or a thin test subclass) when revisiting harnesses (decision 1A).
+
 Proves the process boundary: SharedMemory, Pipe, fork, core pinning, shutdown.
 No Pipecat. No PyAudio. No ONNX.
 

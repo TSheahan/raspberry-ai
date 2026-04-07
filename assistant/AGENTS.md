@@ -12,8 +12,9 @@ Parent context: [mvp-modules/forked_assistant/AGENTS.md](../mvp-modules/forked_a
 | [agent_session.py](agent_session.py) | `AgentSession` ABC + `CursorAgentSession`: Cursor CLI subprocess, stream-json parsing, sentence-boundary streaming, session resume window. |
 | [tts_backends.py](tts_backends.py) | `TTSBackend` + cloud/local implementations (`DeepgramTTS`, `ElevenLabsTTS`, `CartesiaTTS`, `PiperTTS` stub), `_AudioOut` (pyalsaaudio / PyAudio). |
 | [recorder_process.py](recorder_process.py) | Recorder subprocess entry: Pipecat pipeline, ring buffer writer, shutdown protocol toward master. |
-| [recorder_state.py](recorder_state.py) | `RecorderState` base: phase hooks for wake/capture/idle (shared with harnesses). |
-| [phase_protocol.py](phase_protocol.py) | Shared phase vocabulary + `classify_transition()` ([master_state_spec.md](../mvp-modules/forked_assistant/spec/master_state_spec.md) §5a); used by `RecorderState.set_phase()`. |
+| [recorder_state.py](recorder_state.py) | Contract-first `RecorderState`: authoritative phase, counters, `gate_phase_transition()` / `commit_phase()` (child side of `phase_protocol`). |
+| [recorder_state_wired.py](recorder_state_wired.py) | `WiredRecorderState`: pipe, SHM ring writer, `set_phase` worker orchestration, `write_audio` / `signal_*`. |
+| [phase_protocol.py](phase_protocol.py) | Shared phase vocabulary + `classify_transition()` ([master_state_spec.md](../mvp-modules/forked_assistant/spec/master_state_spec.md) §5a); used by `RecorderState` and `MasterState`. |
 | [master_state.py](master_state.py) | Pure base `MasterState`: belief from `STATE_CHANGED`, VAD gating, capture teardown on phase exits ([master_state_spec.md](../mvp-modules/forked_assistant/spec/master_state_spec.md) §4). Subclass: `WiredMasterState` in `master_state_wired.py`. |
 | [master_state_wired.py](master_state_wired.py) | `WiredMasterState(MasterState)`: wires pipe, agent, TTS, ring reader, Deepgram; STT thread + `cognitive_loop` side effects. |
 | [test_phase_protocol.py](test_phase_protocol.py) | Runnable checks: `python assistant/test_phase_protocol.py`. |
