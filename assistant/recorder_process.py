@@ -409,11 +409,8 @@ class OpenWakeWordProcessor(FrameProcessor):
     def __init__(self, state: WiredRecorderState):
         super().__init__()
         self.state = state
-        logger.info("loading openwakeword model: {}", _WAKE_MODEL)
-        self.model = OWWModel(
-            wakeword_models=[_WAKE_MODEL_PATH],
-            inference_framework="onnx",
-        )
+        logger.info("loading openwakeword model: {} from {}", _WAKE_MODEL, _WAKE_MODEL_PATH)
+        self.model = OWWModel(wakeword_model_paths=[_WAKE_MODEL_PATH])
         self._chunks = []
         self.last_detection_time = 0.0
         self.DEBOUNCE_SECONDS = 1.8
