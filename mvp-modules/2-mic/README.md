@@ -12,6 +12,7 @@ Hardware: **Seeed ReSpeaker 2-Mics Pi HAT** (WM8960 codec, I2S).
 | Capture | 2-ch stereo, 16 kHz int16 confirmed |
 | Mixer | `Capture` volume (0-63, default 39/62%), `Left/Right Input Boost Mixer LINPUT1/RINPUT1` (+29 dB) |
 | LEDs | 3× APA102 RGB, SPI bus 0 device 1 (`/dev/spidev0.1`) |
+| User button | BCM **GPIO17**, active-low (internal pull-up; pressed = grounded) |
 | Speaker out | Onboard headphone/speaker amp on same card (not used — playback goes to bcm2835 `hw:0,0`) |
 
 ## Smoke tests
@@ -39,10 +40,23 @@ sudo python mvp-modules/2-mic/smoke_leds.py
 
 Fix: `sudo usermod -aG spi voice` (then re-login or newgrp).
 
+### `smoke_button.py` — user button (GPIO17)
+
+Prints **PRESSED** / **RELEASED** when the onboard button changes state (debounced).
+
+```bash
+source ~/venv/bin/activate
+pip install RPi.GPIO    # once per venv
+python mvp-modules/2-mic/smoke_button.py
+```
+
+**Requires `gpio` group** (or sudo) for `/dev/gpiomem` via RPi.GPIO — same as other GPIO work on the Pi; see `profiling-pi/voice-user-setup.md`.
+
 ## Dependencies
 
 - `spidev` — APA102 LED control over SPI (added to venv)
 - `pyaudio` — already in venv
+- `RPi.GPIO` — button smoke test only (`pip install RPi.GPIO`)
 
 ## Key differences from 4-Mic HAT (AC108)
 
@@ -52,6 +66,7 @@ Fix: `sudo usermod -aG spi voice` (then re-login or newgrp).
 | Codec driver | AC108 (known `scheduling while atomic` bug) | WM8960 (stable, mainline) |
 | Gain control | `ADC1 PGA gain` (0-28) | `Capture` (0-63) + input boost |
 | LEDs | 12× APA102 (SPI) | 3× APA102 (SPI) |
+| User button | (varies by board) | GPIO17, active-low |
 | Playback on HAT | No | Yes (headphone + speaker amp) |
 
 ## Mono downmix strategy
