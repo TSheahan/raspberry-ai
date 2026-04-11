@@ -80,6 +80,28 @@ This means when a processor's `process_frame` calls a synchronous blocking funct
 
 **Source:** Confirmed via pipecat 0.0.108 source inspection (`processors/frame_processor.py`, `transports/base_input.py`, `frames/frames.py`), 2026-04-02.
 
+## EMI and Microphone Signal Integrity
+
+**Root cause of the 2-mic VAD-not-firing bug (2026-04-11):** a USB charger
+cable resting on/adjacent to the WM8960 2-mic HAT coupled enough EMI into
+the analogue front-end to push the capture signal into hard clipping (130
+clipped samples per 13.6 s session). Silero VAD could not detect speech
+transitions in a signal that was wall-to-wall loud with no quiet floor.
+
+Moving the cable away eliminated clipping (130 → 2 samples) and VAD fired
+immediately — same pipeline code, same HAT, same ALSA gain. The signal was
+still "hot" (median frame RMS ~1 500, 69 % of frames above 1 000 RMS) but
+the absence of hard clipping was sufficient for Silero's LSTM to track
+transitions.
+
+**Rule:** keep power cables, USB chargers, and high-current wiring
+physically separated from MEMS microphone HATs. The WM8960's single-ended
+analogue input has no EMI rejection — proximity to switching-frequency
+noise sources (USB charger ~100–500 kHz) directly corrupts the capture.
+
+**Diagnostic evidence:** `mvp-modules/vad-only/dumps.md` (dumps 1–4),
+`mvp-modules/vad-only/4mic_ab_comparison.md`.
+
 ## Pipecat API Version Note
 
 These learnings apply to `pipecat-ai` 0.0.108. The framework's internal API patterns (especially around `process_frame` propagation) may change in future versions.

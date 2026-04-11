@@ -40,6 +40,7 @@ from pipecat.audio.utils import calculate_audio_volume
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", "assistant"))
 from frame_dump import FrameDumpProcessor, frame_dump_enabled
+from input_quality import InputQualityProcessor, input_quality_enabled
 
 INPUT_DEVICE = 1
 SAMPLE_RATE = 16_000
@@ -143,6 +144,8 @@ async def main():
     processors = [transport.input()]
     if dump:
         processors.append(FrameDumpProcessor(prefix="harness_dump"))
+    if input_quality_enabled():
+        processors.append(InputQualityProcessor())
     processors.append(probe)
 
     pipeline = Pipeline(processors)

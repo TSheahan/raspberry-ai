@@ -54,10 +54,12 @@ from pipecat.audio.vad.silero import SileroVADAnalyzer
 from pipecat.audio.vad.vad_analyzer import VADParams
 from pipecat.audio.vad.vad_controller import VADController
 
+from alsa_capture_mixer import apply_recorder_alsa_capture_mixers
 from recorder_state import RecorderState
 from recorder_state_wired import WiredRecorderState
 from audio_shm_ring import AudioShmRingWriter
 from frame_dump import FrameDumpProcessor, frame_dump_enabled
+from input_quality import InputQualityProcessor, input_quality_enabled
 
 def _duty_cycle_enabled() -> bool:
     """True when the active log level is at or below PERF (8).
@@ -600,6 +602,10 @@ async def recorder_child_main(pipe, shm_name: str) -> None:
         state.set_pipe(pipe)
         state.set_shm_ring_writer(ring_writer)
 
+        # WM8960 Seeed HAT: ALSA capture gain before PyAudio (auto-detect + appliance defaults;
+        # see ``alsa_capture_mixer`` module docstring and RECORDER_ALSA_CAPTURE_MIXER=off to disable).
+        apply_recorder_alsa_capture_mixers()
+
         transport = LocalAudioTransport(
             LocalAudioTransportParams(
                 audio_in_enabled=True,
@@ -640,6 +646,8 @@ async def recorder_child_main(pipe, shm_name: str) -> None:
         processors = [input_transport]
         if frame_dump_enabled():
             processors.append(FrameDumpProcessor())
+        if input_quality_enabled():
+            processors.append(InputQualityProcessor())
         if duty_collector:
             processors.append(DutyCycleEntry(duty_collector))
         processors.extend([vad_processor, wake_processor, audio_writer])

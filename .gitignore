@@ -205,6 +205,9 @@ cython_debug/
 .cursorignore
 .cursorindexingignore
 
+# Raw PCM from signal-level tuning / capture_stats (large; regenerate locally)
+mvp-modules/signal_levels/**/*.pcm
+
 # Marimo
 marimo/_static/
 marimo/_lsp/

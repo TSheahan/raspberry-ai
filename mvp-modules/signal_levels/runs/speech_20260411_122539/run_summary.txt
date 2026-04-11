@@ -1,0 +1,22 @@
+Speech baseline — book read-aloud, quiet room, plughw:CARD=seeed2micvoicec,DEV=0, 18 s rounds.
+
+R1 boost=3 PGA=39  median_rms=2281  pct>2k=58.4%  clipped=0  pct<500=4.1%  global_rms=3281
+R2 boost=2 PGA=39  median_rms=783   pct>2k=4.4%   clipped=0  pct<500=30.4% global_rms=1042
+R3 boost=2 PGA=45  median_rms=1365 pct>2k=28.8% clipped=0  pct<500=12.7% global_rms=1856
+
+Reference (context.md): working 2-mic dump median ~1542, ~35% frames >2000 RMS.
+
+RECOMMENDED for voice-agent-like headroom: boost LINPUT1/RINPUT1 = 2, PGA Capture = 45
+(ADC PCM left at 195). Restores speech level near prior operating median without boost=3 clip risk.
+
+Apply:
+  amixer -c seeed2micvoicec cset numid=9 2
+  amixer -c seeed2micvoicec cset numid=8 2
+  amixer -c seeed2micvoicec cset numid=1 45,45
+
+Revert to pre-test:
+  amixer -c seeed2micvoicec cset numid=9 3
+  amixer -c seeed2micvoicec cset numid=8 3
+  amixer -c seeed2micvoicec cset numid=1 39,39
+
+PCM: r1_boost3_pga39.pcm r2_boost2_pga39.pcm r3_boost2_pga45.pcm + *_report.json
