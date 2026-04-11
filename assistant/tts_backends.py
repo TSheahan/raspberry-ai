@@ -53,7 +53,7 @@ from loguru import logger
 # Confirmed in tts_evaluation session 2 (2026-04-05).
 # ---------------------------------------------------------------------------
 
-_ALSA_DEVICE = "hw:0,0"
+_ALSA_DEVICE = "hw:0,0"  # TODO: make configurable (env var) — hardcoded ALSA device breaks if card enumeration shifts
 _ALSA_PERIOD = 4096
 
 

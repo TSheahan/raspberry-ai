@@ -602,7 +602,8 @@ async def recorder_child_main(pipe, shm_name: str) -> None:
         transport = LocalAudioTransport(
             LocalAudioTransportParams(
                 audio_in_enabled=True,
-                audio_in_device_index=1,
+                audio_in_device_index=1,  # TODO: make configurable (env var) — hardcoded PyAudio index breaks if card enumeration shifts
+                audio_in_channels=1,      # mono: OWW, Silero, SHM ring, Deepgram all require single-channel int16. ALSA plug layer downmixes stereo HATs (e.g. 2-mic WM8960) automatically.
                 audio_out_enabled=False,
             )
         )
@@ -615,7 +616,7 @@ async def recorder_child_main(pipe, shm_name: str) -> None:
 
         vad_processor = GatedVADProcessor(
             vad_analyzer=SileroVADAnalyzer(
-                params=VADParams(stop_secs=1.8, start_secs=0.2),
+                params=VADParams(stop_secs=1.8, start_secs=0.2, min_volume=0.0),  # TODO: revisit min_volume after VAD issue disposition — was 0.6 (default), disabled to isolate VAD bug
             ),
             state=state,
             monitor=qdepth_monitor if not duty_cycle_on else None,
