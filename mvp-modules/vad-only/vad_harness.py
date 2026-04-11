@@ -16,6 +16,7 @@ Ctrl+C to stop.
 """
 
 import asyncio
+import os
 import signal
 import sys
 import time
@@ -36,6 +37,9 @@ from pipecat.audio.vad.silero import SileroVADAnalyzer
 from pipecat.audio.vad.vad_analyzer import VADParams, VADState
 from pipecat.audio.vad.vad_controller import VADController
 from pipecat.audio.utils import calculate_audio_volume
+
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", "assistant"))
+from frame_dump import FrameDumpProcessor, frame_dump_enabled
 
 INPUT_DEVICE = 1
 SAMPLE_RATE = 16_000
@@ -117,6 +121,10 @@ async def main():
     print(f"[harness] VAD-only probe — device={INPUT_DEVICE}, rate={SAMPLE_RATE}")
     print(f"[harness] Speak to test. Ctrl+C to stop.\n")
 
+    dump = frame_dump_enabled()
+    if dump:
+        print("[harness] PIPELINE_FRAME_DUMP=1 — PCM capture enabled")
+
     analyzer = SileroVADAnalyzer(
         params=VADParams(stop_secs=1.8, start_secs=0.2, min_volume=0.0),
     )
@@ -132,7 +140,12 @@ async def main():
 
     probe = VADProbe(analyzer)
 
-    pipeline = Pipeline([transport.input(), probe])
+    processors = [transport.input()]
+    if dump:
+        processors.append(FrameDumpProcessor(prefix="harness_dump"))
+    processors.append(probe)
+
+    pipeline = Pipeline(processors)
     runner = PipelineRunner()
     task = PipelineTask(pipeline, idle_timeout_secs=None)
 

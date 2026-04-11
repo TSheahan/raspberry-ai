@@ -57,6 +57,7 @@ from pipecat.audio.vad.vad_controller import VADController
 from recorder_state import RecorderState
 from recorder_state_wired import WiredRecorderState
 from audio_shm_ring import AudioShmRingWriter
+from frame_dump import FrameDumpProcessor, frame_dump_enabled
 
 def _duty_cycle_enabled() -> bool:
     """True when the active log level is at or below PERF (8).
@@ -637,6 +638,8 @@ async def recorder_child_main(pipe, shm_name: str) -> None:
         state.set_ring_writer(audio_writer)
 
         processors = [input_transport]
+        if frame_dump_enabled():
+            processors.append(FrameDumpProcessor())
         if duty_collector:
             processors.append(DutyCycleEntry(duty_collector))
         processors.extend([vad_processor, wake_processor, audio_writer])
